@@ -56,9 +56,12 @@ export HELLS_GATE_BUILD_DIR=/var/tmp/hells-gate-ps5.SQu6Vr
 export REXGLUE_PS5_BUILD="$HELLS_GATE_BUILD_DIR/ps5-build"
 ```
 
-The smoke title is already on the console at `/data/homebrew/PPSA99342`.
-The loadable ELF segments matched the local build on FTP readback. The title
-still needs home-screen registration and a successful launch.
+The ISO was extracted into the WSL build directory's `disc/` folder.
+The corresponding source checkout with the generated guest sources is under
+`hells-gate-game/`. The build used the Title Update 2 patch from the upstream
+portable release. The signed game build and game data are already staged at
+`/data/homebrew/PPSA99342`. Register the folder in the homebrew launcher before
+starting **Hell's Gate (PS5 Development)**.
 
 ## Build the game when the disc and update are ready
 
@@ -77,14 +80,15 @@ still needs home-screen registration and a successful launch.
 
 - Built the patched Linux ReXGlue CLI and cross-compiled `rexruntime` and
   `rexgpu-xenos` for PS5.
-- Cross-compiled, linked and signed the real game host with a synthetic guest
-  fixture to verify its host symbols and system imports. The fixture was kept
-  out of the package and off the console.
-- Signed and uploaded the asset-free diagnostic to the console. The shell
-  reported title-not-found (`0x80940031`) before entering the app, so the
-  hardware smoke checks are pending.
-- The game build still needs actual codegen, first-frame verification and
-  gameplay testing against the matching disc and TU2 files.
+- Recompiled the extracted disc against Title Update 2. The generated-code
+  patcher registered 36,983 functions and reported zero unresolved branch
+  traps after applying its patches.
+- Cross-compiled, linked and signed the game. Verified all five loadable ELF
+  segments against the console copy. Verified sizes of all six uploaded data
+  files and SHA-256 of both the XEX and XEXP.
+- The console launcher reported title-not-found (`0x80940031`) before the
+  executable ran. First boot, rendering, audio, input, saves and gameplay
+  remain unverified.
 
 References [Hell's Gate](https://github.com/florinp93/hells-gate-recomp),
 [KongaTime's Edge of Time PS5 port](https://github.com/KongaTime/Spider-Man-Edge-Of-Time-PS5),
