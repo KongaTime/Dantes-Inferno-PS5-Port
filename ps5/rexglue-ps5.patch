@@ -5612,16 +5612,49 @@ index 9822f3b..ec8aaa3 100644
  
  VirtualKey ParseVirtualKey(std::string_view name) {
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 7360ed9..383b1ba 100644
+index 7360ed9..0244400 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
-@@ -582,6 +582,10 @@ bool Presenter::RefreshGuestOutput(
+@@ -1,3 +1,4 @@
++#include <chrono>
+ /**
+  ******************************************************************************
+  * Xenia : Xbox 360 Emulator Research Project                                 *
+@@ -582,6 +583,38 @@ bool Presenter::RefreshGuestOutput(
    // after switching from UI thread painting to doing it in the guest output
    // thread, will immediately recover to having the latest frame always sent to
    // the host present call on the CPU and all frames reaching a present call).
 +
 +  // Count this as an actual guest frame.
 +  guest_frame_count_.fetch_add(1, std::memory_order_relaxed);
++
++#if REX_PLATFORM_PS5
++  if (is_active) {
++    // The refresh producer runs on the guest GPU thread. Measure new guest
++    // images here so repeated VideoOut flips do not inflate the result.
++    using Clock = std::chrono::steady_clock;
++    const auto now = Clock::now();
++    static thread_local auto window_start = now;
++    static thread_local auto previous_frame = now;
++    static thread_local unsigned frames = 0;
++    static thread_local unsigned slow_intervals = 0;
++    static thread_local double longest_ms = 0.0;
++    const double gap_ms = std::chrono::duration<double, std::milli>(now - previous_frame).count();
++    previous_frame = now;
++    longest_ms = std::max(longest_ms, gap_ms);
++    slow_intervals += gap_ms > 20.0;
++    ++frames;
++    const double elapsed = std::chrono::duration<double>(now - window_start).count();
++    if (elapsed >= 5.0) {
++      REXLOG_INFO("Guest frame pacing: {:.2f} FPS, worst gap {:.1f} ms, {}/{} intervals over 20 ms",
++                  frames / elapsed, longest_ms, slow_intervals, frames);
++      window_start = now;
++      frames = 0;
++      slow_intervals = 0;
++      longest_ms = 0.0;
++    }
++  }
++#endif
 +
    uint32_t last_acquired_and_ready =
        guest_output_mailbox_acquired_and_ready_.load(std::memory_order_relaxed);
