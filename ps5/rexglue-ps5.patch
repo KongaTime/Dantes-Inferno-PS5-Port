@@ -643,6 +643,25 @@ index afb4a30..18aea5a 100644
    // Ordered by the Z order, and then by the time of addition.
    // Note: All the iteration logic involving this Z ordering must be the same as
    // in input handling (in the input listeners in the Window), but in reverse.
+diff --git a/include/rex/ui/surface_prospero.h b/include/rex/ui/surface_prospero.h
+index 328a576..9be41de 100644
+--- a/include/rex/ui/surface_prospero.h
++++ b/include/rex/ui/surface_prospero.h
+@@ -8,11 +8,11 @@
+ namespace rex::ui {
+ 
+ // Display output is independent of the Xbox video-mode and render-scale CVars.
+-// The pinned PS5 Mesa VideoOut WSI exposes a native 3840x2160 surface.
++// The PS5 VideoOut WSI supports several output sizes.
+ class ProsperoDisplaySurface final : public Surface {
+  public:
+-  static constexpr uint32_t kWidth = 3840;
+-  static constexpr uint32_t kHeight = 2160;
++  static uint32_t Width();
++  static uint32_t Height();
+ 
+   TypeIndex GetType() const override { return kTypeIndex_ProsperoDisplay; }
+ 
 diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
 index b10adf9..63d61d1 100644
 --- a/resources/templates/codegen/pch_h.inja
@@ -5699,6 +5718,53 @@ index 7bd277a..dc8058f 100644
      if (XFAILED(status)) {
        REXLOG_ERROR("Graphics presentation setup failed: {:08X}", status);
        return false;
+diff --git a/src/ui/surface_prospero.cpp b/src/ui/surface_prospero.cpp
+index 10c11ff..da1ee07 100644
+--- a/src/ui/surface_prospero.cpp
++++ b/src/ui/surface_prospero.cpp
+@@ -2,12 +2,25 @@
+ // tools/rexglue-sdk/src/ui/surface_prospero.cpp at 59e7086, BSD 3-Clause
+ // License (see LICENSE).
+ #include <rex/ui/surface_prospero.h>
++#include <rex/cvar.h>
++
++REXCVAR_DEFINE_BOOL(prospero_output_1080p, false, "UI/PS5",
++                    "Use 1920x1080 VideoOut buffers instead of 3840x2160")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex::ui {
+ 
++uint32_t ProsperoDisplaySurface::Width() {
++  return Height() * 16 / 9;
++}
++
++uint32_t ProsperoDisplaySurface::Height() {
++  return REXCVAR_GET(prospero_output_1080p) ? 1080 : 2160;
++}
++
+ bool ProsperoDisplaySurface::GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const {
+-  width_out = kWidth;
+-  height_out = kHeight;
++  width_out = Width();
++  height_out = Height();
+   return true;
+ }
+ 
+diff --git a/src/ui/vulkan/vulkan_display_prospero.cpp b/src/ui/vulkan/vulkan_display_prospero.cpp
+index 4eb69e9..6519249 100644
+--- a/src/ui/vulkan/vulkan_display_prospero.cpp
++++ b/src/ui/vulkan/vulkan_display_prospero.cpp
+@@ -169,8 +169,8 @@ VkResult CreateProsperoDisplaySurface(const VulkanInstance& instance,
+         });
+     for (const auto& mode : modes) {
+       const auto& p = mode.parameters;
+-      if (p.visibleRegion.width != ProsperoDisplaySurface::kWidth ||
+-          p.visibleRegion.height != ProsperoDisplaySurface::kHeight ||
++      if (p.visibleRegion.width != ProsperoDisplaySurface::Width() ||
++          p.visibleRegion.height != ProsperoDisplaySurface::Height() ||
+           !(IsStandardRefresh(p.refreshRate) ||
+             (requested_hz == 120 && IsHighRefresh(p.refreshRate)))) {
+         continue;
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
 index 735111d..0b65de0 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
@@ -5747,3 +5813,16 @@ index 735111d..0b65de0 100644
      // Limiting the frame rate, but lets too long frames cause tearing not to
      // make the latency even worse.
      swapchain_create_info.presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+diff --git a/src/ui/window_prospero.cpp b/src/ui/window_prospero.cpp
+index 27e2c4f..49eb14d 100644
+--- a/src/ui/window_prospero.cpp
++++ b/src/ui/window_prospero.cpp
+@@ -53,7 +53,7 @@ ProsperoWindow::~ProsperoWindow() {
+ bool ProsperoWindow::OpenImpl() {
+   WindowDestructionReceiver receiver(this);
+   OnDesiredFullscreenUpdate(true);
+-  OnActualSizeUpdate(ProsperoDisplaySurface::kWidth, ProsperoDisplaySurface::kHeight, receiver);
++  OnActualSizeUpdate(ProsperoDisplaySurface::Width(), ProsperoDisplaySurface::Height(), receiver);
+   OnFocusUpdate(true, receiver);
+   settings_chord_down_ = false;
+   return true;
