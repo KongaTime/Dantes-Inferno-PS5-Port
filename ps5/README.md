@@ -60,8 +60,9 @@ The ISO was extracted into the WSL build directory's `disc/` folder.
 The corresponding source checkout with the generated guest sources is under
 `hells-gate-game/`. The build used the Title Update 2 patch from the upstream
 portable release. The signed game build and game data are already staged at
-`/data/homebrew/PPSA99342`. Register the folder in the homebrew launcher before
-starting **Hell's Gate (PS5 Development)**.
+`/data/homebrew/PPSA99342`. ShadowMount+ has registered the folder. Launch it from the home screen as
+**Hell's Gate (PS5 Development)**. The included template icon is required for
+registration on the tested ShadowMount+ build.
 
 ## Build the game when the disc and update are ready
 
@@ -86,9 +87,10 @@ starting **Hell's Gate (PS5 Development)**.
 - Cross-compiled, linked and signed the game. Verified all five loadable ELF
   segments against the console copy. Verified sizes of all six uploaded data
   files and SHA-256 of both the XEX and XEXP.
-- The console launcher reported title-not-found (`0x80940031`) before the
-  executable ran. First boot, rendering, audio, input, saves and gameplay
-  remain unverified.
+- ShadowMount+ registered the title after `sce_sys/icon0.png` was added and
+  its retry counter reset. On first boot the runtime applied TU2, created
+  a VideoOut swapchain, started the guest, and submitted GPU and audio work.
+  Visual output, controller response, saves and gameplay remain unverified.
 
 References [Hell's Gate](https://github.com/florinp93/hells-gate-recomp),
 [KongaTime's Edge of Time PS5 port](https://github.com/KongaTime/Spider-Man-Edge-Of-Time-PS5),
