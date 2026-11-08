@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 
+#include <rex/cvar.h>
 #include <rex/graphics/vulkan/graphics_system.h>
 #include <rex/logging/macros.h>
 #include <rex/memory/utils.h>
@@ -40,6 +41,10 @@ class HellsGateApp final : public rex::ReXApp {
   }
 
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    // Index-buffer tracing scans guest indices per draw and can flood the log.
+    if (rex::cvar::GetFlagSource("vfetch_oob_trace") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("vfetch_oob_trace", "false");
+    }
     config.graphics = std::make_unique<rex::graphics::vulkan::VulkanGraphicsSystem>();
   }
 
