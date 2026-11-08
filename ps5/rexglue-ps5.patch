@@ -1635,7 +1635,7 @@ index 253e0e6..b5c3539 100644
  
  rex_target_pch(rexgpu-xenos
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index b9a1302..926a09f 100644
+index b9a1302..556f337 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -10,10 +10,17 @@
@@ -1878,7 +1878,7 @@ index b9a1302..926a09f 100644
    for (int n = 0; n < 6; n++) {
      if (cpu_mask & (1 << n)) {
        if (graphics_system_) {
-@@ -968,9 +1136,32 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+@@ -968,9 +1136,65 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
    uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
    reader->AdvanceRead((count - 4) * sizeof(uint32_t));
  
@@ -1887,6 +1887,10 @@ index b9a1302..926a09f 100644
 +    REXCVAR_SET(gpu_pass_trace_frames, REXCVAR_GET(gpu_pass_trace_frames) - 1);
 +  }
 +
++#if REX_PLATFORM_PS5
++  using PacingClock = std::chrono::steady_clock;
++  const auto pacing_start = PacingClock::now();
++#endif
 +  bool wait_for_swap_vblank = REXCVAR_GET(vsync);
 +#if REX_PLATFORM_PS5
 +  wait_for_swap_vblank &= REXCVAR_GET(prospero_wait_guest_swap_vblank);
@@ -1904,14 +1908,43 @@ index b9a1302..926a09f 100644
 +    last_swap_vblank_tick_ = vblank_counter_.load(std::memory_order_relaxed);
 +  }
 +
++#if REX_PLATFORM_PS5
++  const auto pacing_after_wait = PacingClock::now();
++#endif
    IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
  
++#if REX_PLATFORM_PS5
++  const auto pacing_end = PacingClock::now();
++  struct SwapTiming {
++    PacingClock::time_point start;
++    PacingClock::time_point previous_end;
++    unsigned frames = 0;
++    double between_ms = 0;
++    double wait_ms = 0;
++    double swap_ms = 0;
++  };
++  static thread_local SwapTiming timing{pacing_start, pacing_start};
++  using Milliseconds = std::chrono::duration<double, std::milli>;
++  timing.between_ms += Milliseconds(pacing_start - timing.previous_end).count();
++  timing.wait_ms += Milliseconds(pacing_after_wait - pacing_start).count();
++  timing.swap_ms += Milliseconds(pacing_end - pacing_after_wait).count();
++  timing.previous_end = pacing_end;
++  ++timing.frames;
++  if (pacing_end - timing.start >= std::chrono::seconds(5)) {
++    REXGPU_INFO("PS5 swap timing: {} frames, mean between swaps {:.2f} ms, "
++                "vblank wait {:.2f} ms, swap call {:.2f} ms",
++                timing.frames, timing.between_ms / timing.frames,
++                timing.wait_ms / timing.frames, timing.swap_ms / timing.frames);
++    timing = {pacing_end, pacing_end};
++  }
++#endif
++
    ++counter_;
 +  swap_counter_.fetch_add(1, std::memory_order_relaxed);
    return true;
  }
  
-@@ -998,9 +1189,15 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -998,9 +1222,15 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
    uint32_t wait = reader->ReadAndSwap<uint32_t>();
  
    bool is_memory = (wait_info & 0x10) != 0;
@@ -1927,7 +1960,7 @@ index b9a1302..926a09f 100644
      uint32_t value = 0;
      if (is_memory) {
        value =
-@@ -1061,6 +1258,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -1061,6 +1291,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
        }
      }
    } while (!matched);
@@ -1938,7 +1971,7 @@ index b9a1302..926a09f 100644
  
    return true;
  }
-@@ -1072,6 +1273,7 @@ bool CommandProcessor::ExecutePacketType3_REG_RMW(memory::RingBuffer* reader, ui
+@@ -1072,6 +1306,7 @@ bool CommandProcessor::ExecutePacketType3_REG_RMW(memory::RingBuffer* reader, ui
    uint32_t rmw_info = reader->ReadAndSwap<uint32_t>();
    uint32_t and_mask = reader->ReadAndSwap<uint32_t>();
    uint32_t or_mask = reader->ReadAndSwap<uint32_t>();
@@ -1946,7 +1979,7 @@ index b9a1302..926a09f 100644
    uint32_t value = register_file_->values[rmw_info & 0x1FFF];
    if ((rmw_info >> 31) & 0x1) {
      // & reg
-@@ -1100,6 +1302,7 @@ bool CommandProcessor::ExecutePacketType3_REG_TO_MEM(memory::RingBuffer* reader,
+@@ -1100,6 +1335,7 @@ bool CommandProcessor::ExecutePacketType3_REG_TO_MEM(memory::RingBuffer* reader,
    uint32_t mem_addr = reader->ReadAndSwap<uint32_t>();
  
    uint32_t reg_val = ReadRegisterValue(reg_addr);
@@ -1954,7 +1987,7 @@ index b9a1302..926a09f 100644
  
    auto endianness = static_cast<xenos::Endian>(mem_addr & 0x3);
    mem_addr &= ~0x3;
-@@ -1112,6 +1315,7 @@ bool CommandProcessor::ExecutePacketType3_REG_TO_MEM(memory::RingBuffer* reader,
+@@ -1112,6 +1348,7 @@ bool CommandProcessor::ExecutePacketType3_REG_TO_MEM(memory::RingBuffer* reader,
  bool CommandProcessor::ExecutePacketType3_MEM_WRITE(memory::RingBuffer* reader, uint32_t packet,
                                                      uint32_t count) {
    uint32_t write_addr = reader->ReadAndSwap<uint32_t>();
@@ -1962,7 +1995,7 @@ index b9a1302..926a09f 100644
    for (uint32_t i = 0; i < count - 1; i++) {
      uint32_t write_data = reader->ReadAndSwap<uint32_t>();
  
-@@ -1134,6 +1338,9 @@ bool CommandProcessor::ExecutePacketType3_COND_WRITE(memory::RingBuffer* reader,
+@@ -1134,6 +1371,9 @@ bool CommandProcessor::ExecutePacketType3_COND_WRITE(memory::RingBuffer* reader,
    uint32_t mask = reader->ReadAndSwap<uint32_t>();
    uint32_t write_reg_addr = reader->ReadAndSwap<uint32_t>();
    uint32_t write_data = reader->ReadAndSwap<uint32_t>();
@@ -1972,7 +2005,7 @@ index b9a1302..926a09f 100644
    uint32_t value;
    if (wait_info & 0x10) {
      // Memory.
-@@ -1194,6 +1401,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE(memory::RingBuffer* reader
+@@ -1194,6 +1434,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE(memory::RingBuffer* reader
    uint32_t initiator = reader->ReadAndSwap<uint32_t>();
    // Writeback initiator.
    WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
@@ -1980,7 +2013,7 @@ index b9a1302..926a09f 100644
    if (count == 1) {
      // Just an event flag? Where does this write?
    } else {
-@@ -1213,10 +1421,12 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
+@@ -1213,10 +1454,12 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
  
    // Writeback initiator.
    WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
@@ -1994,7 +2027,7 @@ index b9a1302..926a09f 100644
    } else {
      // Write value.
      data_value = value;
-@@ -1238,6 +1448,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
+@@ -1238,6 +1481,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
    auto endianness = static_cast<xenos::Endian>(address & 0x3);
    address &= ~0x3;
  
@@ -2002,7 +2035,7 @@ index b9a1302..926a09f 100644
    // Let us hope we can fake this.
    // This callback tells the driver the xy coordinates affected by a previous
    // drawcall.
-@@ -1265,6 +1476,8 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
+@@ -1265,6 +1509,8 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
    // Writeback initiator.
    WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
  
@@ -2011,7 +2044,7 @@ index b9a1302..926a09f 100644
    // Occlusion queries:
    // This command is send on query begin and end.
    // As a workaround report some fixed amount of passed samples.
-@@ -1292,6 +1505,84 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
+@@ -1292,6 +1538,84 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
    return true;
  }
  
@@ -2096,7 +2129,7 @@ index b9a1302..926a09f 100644
  bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet,
                                                const char* opcode_name, uint32_t viz_query_condition,
                                                uint32_t count_remaining) {
-@@ -1378,7 +1669,10 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -1378,7 +1702,10 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
    // we don't support yet.
    reader->AdvanceRead(count_remaining * sizeof(uint32_t));
  
@@ -2108,7 +2141,7 @@ index b9a1302..926a09f 100644
      auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
      if (!(viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z)) {
        // TODO(Triang3l): Don't drop the draw call completely if the vertex
-@@ -1388,6 +1682,9 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -1388,6 +1715,9 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
  
        bool major_mode_explicit =
            xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
@@ -2118,7 +2151,7 @@ index b9a1302..926a09f 100644
        draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
                                   is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
        if (!draw_succeeded) {
-@@ -1410,6 +1707,53 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -1410,6 +1740,53 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
    // for instance, features not supported by the host), don't terminate command
    // buffer processing as that would leave rendering in a way more inconsistent
    // state than just a single dropped draw command.
@@ -2172,7 +2205,7 @@ index b9a1302..926a09f 100644
    return true;
  }
  
-@@ -1621,4 +1965,60 @@ bool CommandProcessor::ExecutePacketType3_VIZ_QUERY(memory::RingBuffer* reader,
+@@ -1621,4 +1998,60 @@ bool CommandProcessor::ExecutePacketType3_VIZ_QUERY(memory::RingBuffer* reader,
    return true;
  }
  
