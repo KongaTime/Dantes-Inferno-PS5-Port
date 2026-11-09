@@ -4247,10 +4247,10 @@ index 26d554c..9d62173 100644
            rex::align(level_layout.row_pitch_bytes, xenos::kTextureLinearRowAlignmentBytes);
      }
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
-index ec0df7c..32783a2 100644
+index ec0df7c..1e5dacc 100644
 --- a/src/graphics/shared_memory.cpp
 +++ b/src/graphics/shared_memory.cpp
-@@ -10,18 +10,51 @@
+@@ -10,18 +10,54 @@
   */
  
  #include <algorithm>
@@ -4277,6 +4277,9 @@ index ec0df7c..32783a2 100644
 +#if REX_PLATFORM_PS5
 +REXCVAR_DEFINE_BOOL(ps5_profile_residency_pages, false, "GPU/PS5",
 +                    "Sample time spent checking and uploading shared GPU memory pages");
++REXCVAR_DEFINE_BOOL(ps5_exact_gpu_page_invalidation, false, "GPU/PS5",
++                    "Limit shared GPU memory invalidation to the written host pages")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +#endif
 +
  namespace rex::graphics {
@@ -4302,7 +4305,7 @@ index ec0df7c..32783a2 100644
  SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
    page_size_log2_ = rex::log2_ceil(uint32_t(rex::memory::page_size()));
  }
-@@ -254,6 +287,10 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last, bool inv
+@@ -254,6 +290,10 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last, bool inv
    }
  }
  
@@ -4313,7 +4316,7 @@ index ec0df7c..32783a2 100644
  void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
    if (length == 0 || start >= kBufferSize) {
      return;
-@@ -272,6 +309,34 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
+@@ -272,6 +312,34 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
    MakeRangeValid(start, length, true);
  }
  
@@ -4348,7 +4351,7 @@ index ec0df7c..32783a2 100644
  bool SharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
                                                      uint32_t length_allocations) {
    assert_always(
-@@ -342,46 +407,75 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -342,46 +410,75 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
      return true;
    }
  
@@ -4456,7 +4459,7 @@ index ec0df7c..32783a2 100644
  
    for (const std::pair<uint32_t, uint32_t>& range : merged_ranges) {
      if (!EnsureHostGpuMemoryAllocated(range.first, range.second)) {
-@@ -389,6 +483,9 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -389,6 +486,9 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
      }
    }
  
@@ -4466,7 +4469,7 @@ index ec0df7c..32783a2 100644
    upload_ranges_.clear();
    auto append_upload_range = [this](uint32_t page_start, uint32_t page_count) {
      if (!page_count) {
-@@ -455,6 +552,39 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -455,6 +555,39 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
      }
    }
  
@@ -4506,6 +4509,18 @@ index ec0df7c..32783a2 100644
    COUNT_profile_set("gpu/shared_memory/request_ranges_count", uint32_t(count));
    COUNT_profile_set("gpu/shared_memory/request_ranges_merged_count",
                      uint32_t(merged_ranges.size()));
+@@ -494,6 +627,11 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+ 
+   auto global_lock = global_critical_region_.Acquire();
+ 
++#if REX_PLATFORM_PS5
++  // Keep unrelated pages valid and watched when the guest writes to one
++  // host page. Wider invalidation trades fewer faults for more reuploads.
++  exact_range |= REXCVAR_GET(ps5_exact_gpu_page_invalidation);
++#endif
+   if (!exact_range) {
+     // Check if a somewhat wider range (up to 256 KB with 4 KB pages) can be
+     // invalidated - if no GPU-written data nearby that was not intended to be
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
 index 0c996bd..079fa4c 100644
 --- a/src/graphics/vulkan/command_processor.cpp
