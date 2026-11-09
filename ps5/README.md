@@ -11,7 +11,8 @@ window, reads back a sentinel from the Xbox 360 guest heap, and initializes the
 Xenos/RADV presenter without Xbox 360 game files.
 
 The separate native-renderer smoke title (`PPSA99343`) creates a DiligentCore
-Vulkan device through RADV and submits an offscreen clear. It uses no game data.
+Vulkan device through RADV, verifies an offscreen clear by reading back a pixel,
+then displays a green frame through PS5 VideoOut. It uses no game data.
 After building the PS5 runtime, build it with `bash ps5/build.sh native-deps`
 and `bash ps5/build.sh native-smoke`. The package is under
 `native-title-template/dist/PPSA99343` inside the build directory.

@@ -9,6 +9,7 @@
 #include "Graphics/GraphicsEngine/interface/TextureView.h"
 #include "Graphics/GraphicsEngineVulkan/interface/EngineFactoryVk.h"
 #include "Graphics/GraphicsTools/interface/OffScreenSwapChain.hpp"
+#include "Primitives/interface/DebugOutput.h"
 
 #include <rex/ui/windowed_app.h>
 #include <rex/ui/windowed_app_context.h>
@@ -29,6 +30,12 @@ class NativeSmoke final : public rex::ui::WindowedApp {
  private:
   bool OnInitialize() override {
     using namespace Diligent;
+    SetDebugMessageCallback([](DEBUG_MESSAGE_SEVERITY severity, const char* message,
+                               const char*, const char*, int) {
+      if (severity >= DEBUG_MESSAGE_SEVERITY_WARNING) {
+        title_note("Diligent: %s", message ? message : "");
+      }
+    });
     title_note("native smoke: creating Diligent Vulkan device through RADV");
     auto* factory = GetEngineFactoryVk();
     EngineVkCreateInfo engine;
@@ -91,10 +98,36 @@ class NativeSmoke final : public rex::ui::WindowedApp {
       title_note("native smoke: FAIL unexpected clear color");
       return false;
     }
-    title_note("native smoke: PASS");
-    app_context().CallInUIThreadDeferred([this] { app_context().QuitFromUIThread(); });
+    title_note("native smoke: offscreen readback PASS");
+
+    title_note("native smoke: creating PS5 VideoOut swapchain");
+    SwapChainDesc display_desc;
+    display_desc.ColorBufferFormat = TEX_FORMAT_BGRA8_UNORM;
+    display_desc.DepthBufferFormat = TEX_FORMAT_UNKNOWN;
+    display_desc.BufferCount = 3;
+    RefCntAutoPtr<ISwapChain> display;
+    factory->CreateSwapChainVk(device, context, display_desc, NativeWindow{}, &display);
+    auto* display_view = display ? display->GetCurrentBackBufferRTV() : nullptr;
+    if (!display_view) {
+      title_note("native smoke: FAIL VideoOut swapchain");
+      return false;
+    }
+    context->SetRenderTargets(1, &display_view, nullptr, transition);
+    context->ClearRenderTarget(display_view, color, transition);
+    display->Present(1);
+    context->WaitForIdle();
+    const auto& display_size = display->GetDesc();
+    title_note("native smoke: VideoOut frame presented at %ux%u", display_size.Width,
+               display_size.Height);
+    device_ = device;
+    context_ = context;
+    display_ = display;
     return true;
   }
+
+  Diligent::RefCntAutoPtr<Diligent::IRenderDevice> device_;
+  Diligent::RefCntAutoPtr<Diligent::IDeviceContext> context_;
+  Diligent::RefCntAutoPtr<Diligent::ISwapChain> display_;
 };
 
 }  // namespace

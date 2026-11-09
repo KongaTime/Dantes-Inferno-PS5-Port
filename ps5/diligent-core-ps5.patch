@@ -27,8 +27,123 @@ index bda023b..c2f9207 100644
      elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
          set(PLATFORM_LINUX TRUE CACHE INTERNAL "Target platform: Linux")
          message("Target platform: Linux " ${ARCH})
+diff --git a/Graphics/GraphicsEngineVulkan/src/SwapChainVkImpl.cpp b/Graphics/GraphicsEngineVulkan/src/SwapChainVkImpl.cpp
+index 661db63..7488e1a 100644
+--- a/Graphics/GraphicsEngineVulkan/src/SwapChainVkImpl.cpp
++++ b/Graphics/GraphicsEngineVulkan/src/SwapChainVkImpl.cpp
+@@ -64,6 +64,96 @@ SwapChainVkImpl::SwapChainVkImpl(IReferenceCounters*  pRefCounters,
+     pRenderDeviceVk->CreateFence(FenceCI, &m_FrameCompleteFence);
+ }
+ 
++#if defined(__PROSPERO__)
++template <typename T, typename Enumerate>
++static std::vector<T> EnumerateDisplayProperties(Enumerate Get)
++{
++    uint32_t Count = 0;
++    if (Get(&Count, nullptr) != VK_SUCCESS || Count == 0)
++        return {};
++    std::vector<T> Items(Count);
++    if (Get(&Count, Items.data()) != VK_SUCCESS)
++        return {};
++    Items.resize(Count);
++    return Items;
++}
++
++static VkResult CreateProsperoSurface(VkInstance Instance, VkPhysicalDevice PhysicalDevice, VkSurfaceKHR* Surface)
++{
++    if (!vkGetPhysicalDeviceDisplayPropertiesKHR || !vkGetPhysicalDeviceDisplayPlanePropertiesKHR ||
++        !vkGetDisplayPlaneSupportedDisplaysKHR || !vkGetDisplayModePropertiesKHR ||
++        !vkGetDisplayPlaneCapabilitiesKHR || !vkCreateDisplayPlaneSurfaceKHR)
++        return VK_ERROR_EXTENSION_NOT_PRESENT;
++
++    const auto Displays = EnumerateDisplayProperties<VkDisplayPropertiesKHR>(
++        [&](uint32_t* Count, VkDisplayPropertiesKHR* Values) {
++            return vkGetPhysicalDeviceDisplayPropertiesKHR(PhysicalDevice, Count, Values);
++        });
++    const auto Planes = EnumerateDisplayProperties<VkDisplayPlanePropertiesKHR>(
++        [&](uint32_t* Count, VkDisplayPlanePropertiesKHR* Values) {
++            return vkGetPhysicalDeviceDisplayPlanePropertiesKHR(PhysicalDevice, Count, Values);
++        });
++
++    for (const auto& Display : Displays)
++    {
++        if (!(Display.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR))
++            continue;
++        const auto Modes = EnumerateDisplayProperties<VkDisplayModePropertiesKHR>(
++            [&](uint32_t* Count, VkDisplayModePropertiesKHR* Values) {
++                return vkGetDisplayModePropertiesKHR(PhysicalDevice, Display.display, Count, Values);
++            });
++        for (uint32_t PlaneIndex = 0; PlaneIndex < Planes.size(); ++PlaneIndex)
++        {
++            const auto& Plane = Planes[PlaneIndex];
++            if (Plane.currentDisplay && Plane.currentDisplay != Display.display)
++                continue;
++            const auto Supported = EnumerateDisplayProperties<VkDisplayKHR>(
++                [&](uint32_t* Count, VkDisplayKHR* Values) {
++                    return vkGetDisplayPlaneSupportedDisplaysKHR(PhysicalDevice, PlaneIndex, Count, Values);
++                });
++            if (std::find(Supported.begin(), Supported.end(), Display.display) == Supported.end())
++                continue;
++            for (const auto& Mode : Modes)
++            {
++                VkDisplayPlaneCapabilitiesKHR Caps{};
++                if (vkGetDisplayPlaneCapabilitiesKHR(PhysicalDevice, Mode.displayMode, PlaneIndex, &Caps) != VK_SUCCESS)
++                    continue;
++                const auto Extent = Mode.parameters.visibleRegion;
++                const auto Fits = [Extent](VkExtent2D Min, VkExtent2D Max) {
++                    return Extent.width >= Min.width && Extent.width <= Max.width &&
++                           Extent.height >= Min.height && Extent.height <= Max.height;
++                };
++                if (!Fits(Caps.minSrcExtent, Caps.maxSrcExtent) || !Fits(Caps.minDstExtent, Caps.maxDstExtent))
++                    continue;
++                if (Caps.minSrcPosition.x > 0 || Caps.minSrcPosition.y > 0 ||
++                    Caps.maxSrcPosition.x < 0 || Caps.maxSrcPosition.y < 0 ||
++                    Caps.minDstPosition.x > 0 || Caps.minDstPosition.y > 0 ||
++                    Caps.maxDstPosition.x < 0 || Caps.maxDstPosition.y < 0)
++                    continue;
++                VkDisplayPlaneAlphaFlagBitsKHR Alpha = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
++                if (!(Caps.supportedAlpha & Alpha))
++                    Alpha = VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR;
++                if (!(Caps.supportedAlpha & Alpha))
++                    continue;
++
++                VkDisplaySurfaceCreateInfoKHR Info{};
++                Info.sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR;
++                Info.displayMode = Mode.displayMode;
++                Info.planeIndex = PlaneIndex;
++                Info.planeStackIndex = Plane.currentStackIndex;
++                Info.transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++                Info.globalAlpha = 1.0f;
++                Info.alphaMode = Alpha;
++                Info.imageExtent = Extent;
++                if (vkCreateDisplayPlaneSurfaceKHR(Instance, &Info, nullptr, Surface) == VK_SUCCESS)
++                    return VK_SUCCESS;
++            }
++        }
++    }
++    return VK_ERROR_INITIALIZATION_FAILED;
++}
++#endif
++
+ void SwapChainVkImpl::CreateSurface()
+ {
+     if (m_VkSurface != VK_NULL_HANDLE)
+@@ -74,7 +164,12 @@ void SwapChainVkImpl::CreateSurface()
+ 
+     // Create OS-specific surface
+     VkResult err = VK_ERROR_INITIALIZATION_FAILED;
+-#if defined(VK_USE_PLATFORM_WIN32_KHR)
++#if defined(__PROSPERO__)
++    if (m_Instance->IsExtensionEnabled(VK_KHR_DISPLAY_EXTENSION_NAME))
++        err = CreateProsperoSurface(m_Instance->GetVkInstance(),
++                                    m_pRenderDevice.RawPtr<RenderDeviceVkImpl>()->GetVkPhysicalDevice(),
++                                    &m_VkSurface);
++#elif defined(VK_USE_PLATFORM_WIN32_KHR)
+     if (m_Window.hWnd != NULL)
+     {
+         if (!m_Instance->IsExtensionEnabled(VK_KHR_WIN32_SURFACE_EXTENSION_NAME))
 diff --git a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
-index 4534337..9a77807 100644
+index 4534337..7609665 100644
 --- a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
 +++ b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
 @@ -251,13 +251,22 @@ std::shared_ptr<Instance> Instance::Create(const CreateInfo& CI)
@@ -54,6 +169,17 @@ index 4534337..9a77807 100644
      return VulkanLoaded;
  }
  #endif
+@@ -375,6 +384,10 @@ Instance::Instance(const CreateInfo& CI) :
+     if (IsExtensionAvailable(VK_KHR_SURFACE_EXTENSION_NAME))
+     {
+         InstanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
++#if defined(__PROSPERO__)
++        if (IsExtensionAvailable(VK_KHR_DISPLAY_EXTENSION_NAME))
++            InstanceExtensions.push_back(VK_KHR_DISPLAY_EXTENSION_NAME);
++#endif
+ 
+         // Enable only available surface extensions. Compiled-in window system support does not
+         // imply runtime availability (e.g. RenderDoc may not expose Wayland support).
 diff --git a/Platforms/Linux/src/LinuxFileSystem.cpp b/Platforms/Linux/src/LinuxFileSystem.cpp
 index 51da651..fe9fdd0 100644
 --- a/Platforms/Linux/src/LinuxFileSystem.cpp
