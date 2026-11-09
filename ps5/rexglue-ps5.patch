@@ -4211,7 +4211,7 @@ index ec0df7c..78a020a 100644
                                                      uint32_t length_allocations) {
    assert_always(
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 0c996bd..ee5232a 100644
+index 0c996bd..079fa4c 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -11,6 +11,7 @@
@@ -4233,7 +4233,7 @@ index 0c996bd..ee5232a 100644
  REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
                      "Read data written by memory export in shaders on the CPU")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
-@@ -65,15 +70,75 @@ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
+@@ -65,15 +70,81 @@ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
                      "Submit command buffer when PM4 primary buffer ends")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -4262,13 +4262,19 @@ index 0c996bd..ee5232a 100644
 +enum class DrawPhase {
 +  kSetup,
 +  kCopy,
-+  kPrimitiveAndShader,
++  kSubmission,
++  kPrimitive,
++  kShader,
 +  kSamplers,
 +  kTextures,
 +  kTargets,
 +  kPipelineAndState,
 +  kBindings,
-+  kGeometryAndEmit,
++  kVertexResidency,
++  kMemexportAndIndex,
++  kBarriers,
++  kEmit,
++  kMemexportFinish,
 +  kCount,
 +};
 +
@@ -4309,7 +4315,7 @@ index 0c996bd..ee5232a 100644
  // glslang default built-in resource limits.
  constexpr TBuiltInResource kGlslangDefaultTBuiltInResource = {
      /* .maxLights = */ 32,
-@@ -2273,6 +2338,29 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2273,6 +2344,33 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
  void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                         uint32_t frontbuffer_height) {
    SCOPE_profile_cpu_f("gpu");
@@ -4323,14 +4329,18 @@ index 0c996bd..ee5232a 100644
 +          return timing.microseconds[size_t(phase)] / double(timing.samples);
 +        };
 +        REXGPU_INFO("PS5 draw phases: {} samples, us per sampled draw: "
-+                    "setup {:.2f}, copy {:.2f}, primitive/shader {:.2f}, samplers {:.2f}, "
-+                    "textures {:.2f}, targets {:.2f}, pipeline/state {:.2f}, "
-+                    "bindings {:.2f}, geometry/emit {:.2f}",
++                    "setup {:.2f}, copy {:.2f}, submission {:.2f}, primitive {:.2f}, "
++                    "shader {:.2f}, samplers {:.2f}, textures {:.2f}, targets {:.2f}, "
++                    "pipeline/state {:.2f}, bindings {:.2f}, vertex residency {:.2f}, "
++                    "memexport/index {:.2f}, barriers {:.2f}, emit {:.2f}, memexport finish {:.2f}",
 +                    timing.samples, mean(DrawPhase::kSetup), mean(DrawPhase::kCopy),
-+                    mean(DrawPhase::kPrimitiveAndShader), mean(DrawPhase::kSamplers),
++                    mean(DrawPhase::kSubmission), mean(DrawPhase::kPrimitive),
++                    mean(DrawPhase::kShader), mean(DrawPhase::kSamplers),
 +                    mean(DrawPhase::kTextures), mean(DrawPhase::kTargets),
 +                    mean(DrawPhase::kPipelineAndState), mean(DrawPhase::kBindings),
-+                    mean(DrawPhase::kGeometryAndEmit));
++                    mean(DrawPhase::kVertexResidency), mean(DrawPhase::kMemexportAndIndex),
++                    mean(DrawPhase::kBarriers), mean(DrawPhase::kEmit),
++                    mean(DrawPhase::kMemexportFinish));
 +      }
 +      timing = {now};
 +    }
@@ -4339,7 +4349,7 @@ index 0c996bd..ee5232a 100644
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
-@@ -2307,8 +2395,6 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2307,8 +2405,6 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
  
    SwapPostEffect swap_post_effect = GetActualSwapPostEffect();
  
@@ -4348,7 +4358,7 @@ index 0c996bd..ee5232a 100644
    uint32_t frontbuffer_width_scaled, frontbuffer_height_scaled;
    uint32_t frontbuffer_width_unscaled = 0, frontbuffer_height_unscaled = 0;
    xenos::TextureFormat frontbuffer_format;
-@@ -2320,9 +2406,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2320,9 +2416,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
      REXGPU_ERROR("XELOG_GPU PRESENT: swap_texture_view=NULL");
      return;
    }
@@ -4360,7 +4370,7 @@ index 0c996bd..ee5232a 100644
    auto get_active_swap_dimension = [](uint32_t packet_unscaled, uint32_t source_unscaled,
                                        uint32_t source_scaled) -> uint32_t {
      if (!source_scaled) {
-@@ -2408,6 +2493,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2408,6 +2503,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
    uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
    uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
@@ -4374,7 +4384,7 @@ index 0c996bd..ee5232a 100644
  
    presenter->RefreshGuestOutput(
        guest_output_width, guest_output_height, display_width, display_height,
-@@ -3604,6 +3696,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3604,6 +3706,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
  
@@ -4384,7 +4394,7 @@ index 0c996bd..ee5232a 100644
    const RegisterFile& regs = *register_file_;
    (void)index_buffer_info;
    auto draw_fail = [&](const char* stage) {
-@@ -3622,6 +3717,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3622,6 +3727,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
  
    xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
    if (edram_mode == xenos::EdramMode::kCopy) {
@@ -4394,17 +4404,34 @@ index 0c996bd..ee5232a 100644
      // Special copy handling.
      return IssueCopy();
    }
-@@ -3713,6 +3811,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3713,10 +3821,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // before the awaiting may be referencing objects destroyed by
    // CompletedSubmissionUpdated.
    for (uint32_t i = 0; i < 2; ++i) {
 +#if REX_PLATFORM_PS5
-+    draw_phase_sample.Next(DrawPhase::kPrimitiveAndShader);
++    draw_phase_sample.Next(DrawPhase::kSubmission);
 +#endif
      if (!BeginSubmission(true)) {
        return draw_fail("begin_submission");
      }
-@@ -3768,6 +3869,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+ 
++#if REX_PLATFORM_PS5
++    draw_phase_sample.Next(DrawPhase::kPrimitive);
++#endif
+     // Process primitives.
+     if (!primitive_processor_->Process(primitive_processing_result)) {
+       return draw_fail("primitive_processing");
+@@ -3747,6 +3861,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       return false;
+     }
+ 
++#if REX_PLATFORM_PS5
++    draw_phase_sample.Next(DrawPhase::kShader);
++#endif
+     // Shader modifications.
+     vertex_shader_modification = pipeline_cache_->GetCurrentVertexShaderModification(
+         *vertex_shader, primitive_processing_result.host_vertex_shader_type, interpolator_mask,
+@@ -3768,6 +3885,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        return draw_fail("shader_translation");
      }
  
@@ -4414,7 +4441,7 @@ index 0c996bd..ee5232a 100644
      // Obtain the samplers. Note that the bindings don't depend on the shader
      // modification, so if on the second iteration of this loop it becomes
      // different for some reason (like a race condition with the guest in index
-@@ -3845,15 +3949,24 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3845,15 +3965,24 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -4439,7 +4466,7 @@ index 0c996bd..ee5232a 100644
    // Create the pipeline (for this, need the render pass from the render target
    // cache), translating the shaders - doing this now to obtain the used
    // textures.
-@@ -3904,6 +4017,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3904,6 +4033,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          descriptor_sets_kept = std::min(
              descriptor_sets_kept, uint32_t(SpirvShaderTranslator::kDescriptorSetTexturesPixel));
        }
@@ -4447,7 +4474,7 @@ index 0c996bd..ee5232a 100644
      } else {
        // No or unknown pipeline layout previously bound - all bindings are in an
        // indeterminate state.
-@@ -3981,12 +4095,18 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3981,12 +4111,18 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
                               shader_32bit_index_dma, 0, viewport_info, used_texture_mask,
                               normalized_depth_control, normalized_color_mask);
  
@@ -4461,12 +4488,12 @@ index 0c996bd..ee5232a 100644
    }
  
 +#if REX_PLATFORM_PS5
-+  draw_phase_sample.Next(DrawPhase::kGeometryAndEmit);
++  draw_phase_sample.Next(DrawPhase::kVertexResidency);
 +#endif
    // Ensure vertex buffers are resident.
    const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
    for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
-@@ -4037,6 +4157,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4037,6 +4173,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      }
    }
  
@@ -4474,10 +4501,43 @@ index 0c996bd..ee5232a 100644
 +    TraceVertexFetchOOB(*vertex_shader, index_count, index_buffer_info);
 +  }
 +
++#if REX_PLATFORM_PS5
++  draw_phase_sample.Next(DrawPhase::kMemexportAndIndex);
++#endif
    // Synchronize the memory pages backing memory scatter export streams, and
    // calculate the range that includes the streams for the buffer barrier.
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
-@@ -4401,7 +4525,8 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4100,6 +4243,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     }
+   }
+ 
++#if REX_PLATFORM_PS5
++  draw_phase_sample.Next(DrawPhase::kBarriers);
++#endif
+   // Insert the shared memory barrier if needed.
+   // TODO(Triang3l): Find some PM4 command that can be used for indication of
+   // when memexports should be awaited instead of inserting the barrier in Use
+@@ -4125,6 +4271,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       render_target_cache_->last_update_render_pass(),
+       render_target_cache_->last_update_framebuffer());
+ 
++#if REX_PLATFORM_PS5
++  draw_phase_sample.Next(DrawPhase::kEmit);
++#endif
+   // Draw.
+   if (primitive_processing_result.index_buffer_type ==
+           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
+@@ -4164,6 +4313,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+                                               0, 0, 0);
+   }
+ 
++#if REX_PLATFORM_PS5
++  draw_phase_sample.Next(DrawPhase::kMemexportFinish);
++#endif
+   // Invalidate textures in memexported memory and watch for changes.
+   if (!memexport_ranges_.empty()) {
+     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+@@ -4401,7 +4553,8 @@ bool VulkanCommandProcessor::IssueCopy() {
    }
  
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
@@ -4487,7 +4547,7 @@ index 0c996bd..ee5232a 100644
      uint32_t written_address, written_length;
      return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
                                           written_address, written_length);
-@@ -4431,7 +4556,18 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4431,7 +4584,18 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
  
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
    if (readback_mode == ReadbackResolveMode::kDisabled) {
@@ -4507,7 +4567,7 @@ index 0c996bd..ee5232a 100644
    }
  
    auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
-@@ -6569,26 +6705,15 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6569,26 +6733,15 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      sampler_count_pixel = 0;
      texture_count_pixel = 0;
    }
@@ -4537,7 +4597,7 @@ index 0c996bd..ee5232a 100644
    descriptor_write_image_info_.clear();
    descriptor_write_image_info_.reserve(
        (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
-@@ -6634,6 +6759,78 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6634,6 +6787,78 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      }
    }
  
@@ -4616,7 +4676,7 @@ index 0c996bd..ee5232a 100644
    // Write the new descriptor sets.
  
    // Consecutive bindings updated via a single VkWriteDescriptorSet must have
-@@ -6698,6 +6895,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6698,6 +6923,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
      current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesVertex] =
          write_textures[0].dstSet;
@@ -4628,7 +4688,7 @@ index 0c996bd..ee5232a 100644
    }
    // Pixel shader textures and samplers.
    if (write_pixel_textures) {
-@@ -6715,6 +6917,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6715,6 +6945,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
      current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesPixel] =
          write_textures[0].dstSet;
