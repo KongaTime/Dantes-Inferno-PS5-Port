@@ -366,10 +366,20 @@ index dce3dbf..fc18299 100644
    spv::Id uniform_system_constants_;
    spv::Id uniform_float_constants_;
 diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
-index d26cd4f..f89e54e 100644
+index d26cd4f..7fbe40b 100644
 --- a/include/rex/graphics/pipeline/texture/cache.h
 +++ b/include/rex/graphics/pipeline/texture/cache.h
-@@ -91,6 +91,11 @@ class TextureCache {
+@@ -53,6 +53,9 @@ namespace rex::graphics {
+ // TODO(Triang3l): Attach the largest LOD to existing textures with a valid
+ // mip_address but no base ever used yet (no base_address) to save memory
+ // because textures are streamed this way anyway.
++// [crackdown] Counts texture destructions (kept descriptor sets are dropped).
++inline std::atomic<uint32_t> texture_binding_reset_generation{0};
++
+ class TextureCache {
+  public:
+   // Hard limit, originating from the half-pixel offset filling hack in the
+@@ -91,6 +94,11 @@ class TextureCache {
  
    static uint32_t GuestToHostSwizzle(uint32_t guest_swizzle, uint32_t host_format_swizzle);
  
@@ -381,7 +391,7 @@ index d26cd4f..f89e54e 100644
    void TextureFetchConstantWritten(uint32_t index) { TextureFetchConstantsWritten(index, index); }
    void TextureFetchConstantsWritten(uint32_t first_index, uint32_t last_index) {
      if (first_index > last_index) {
-@@ -121,6 +126,10 @@ class TextureCache {
+@@ -121,6 +129,10 @@ class TextureCache {
      const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
      return binding ? binding->swizzled_signs : kSwizzledSignsUnsigned;
    }
@@ -392,7 +402,7 @@ index d26cd4f..f89e54e 100644
    bool IsActiveTextureResolutionScaled(uint32_t fetch_constant_index) const {
      const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
      if (!binding) {
-@@ -452,6 +461,9 @@ class TextureCache {
+@@ -452,6 +464,9 @@ class TextureCache {
  
    struct TextureBinding {
      TextureKey key;
@@ -444,6 +454,28 @@ index 4d85a2b..2f5c8cf 100644
   protected:
    SharedMemory(memory::Memory& memory);
    // Call in implementation-specific initialization.
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 696ff48..7b37604 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -566,6 +566,17 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // Temporary storage with reusable memory for writing image and sampler
+   // descriptors.
+   std::vector<VkDescriptorImageInfo> descriptor_write_image_info_;
++  // [crackdown] the texture bindings last written for each stage (0 vertex, 1 pixel)
++  struct TextureBindingMemo {
++    uint64_t frame = 0;
++    uint32_t reset_generation = 0;
++    VkDescriptorSet set = VK_NULL_HANDLE;
++    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
++    uint32_t texture_count = 0;
++    uint32_t sampler_count = 0;
++    std::vector<VkDescriptorImageInfo> infos;
++  };
++  TextureBindingMemo texture_binding_memo_[2];
+ 
+   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> uniform_buffer_pool_;
+ 
 diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
 index 7b938b9..fd1b380 100644
 --- a/include/rex/graphics/vulkan/pipeline_cache.h
@@ -3748,7 +3780,7 @@ index 9ce3bb4..f3ede90 100644
          {
            uint32_t result_remaining_components = used_result_nonzero_components;
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 76f5600..0d0a8c2 100644
+index 76f5600..dce73ee 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
 @@ -45,7 +45,7 @@ REXCVAR_DEFINE_INT32(texture_cache_memory_limit_soft_lifetime, 30, "GPU",
@@ -3760,7 +3792,15 @@ index 76f5600..0d0a8c2 100644
                      "Sample problematic 3D textures through 2D-compatible wrappers")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
-@@ -366,11 +366,49 @@ uint32_t TextureCache::GuestToHostSwizzle(uint32_t guest_swizzle, uint32_t host_
+@@ -292,6 +292,7 @@ void TextureCache::CompletedSubmissionUpdated(uint64_t completed_submission_inde
+       ResetTextureBindings();
+     }
+     // Remove the texture from the map and destroy it via its unique_ptr.
++    texture_binding_reset_generation.fetch_add(1, std::memory_order_relaxed);
+     auto found_texture_it = textures_.find(texture->key());
+     assert_true(found_texture_it != textures_.end());
+     if (found_texture_it != textures_.end()) {
+@@ -366,11 +367,49 @@ uint32_t TextureCache::GuestToHostSwizzle(uint32_t guest_swizzle, uint32_t host_
    return host_swizzle;
  }
  
@@ -3811,7 +3851,7 @@ index 76f5600..0d0a8c2 100644
      return false;
    }
  
-@@ -384,6 +422,18 @@ bool TextureCache::PrepareTextureLoad(Texture& texture, PendingTextureLoad& pend
+@@ -384,6 +423,18 @@ bool TextureCache::PrepareTextureLoad(Texture& texture, PendingTextureLoad& pend
      if (outdated_mask & Texture::kOutdatedBitMips) {
        mips_outdated = texture.mips_outdated(global_lock);
      }
@@ -3830,7 +3870,7 @@ index 76f5600..0d0a8c2 100644
    }
    if (!base_outdated && !mips_outdated) {
      return false;
-@@ -394,7 +444,6 @@ bool TextureCache::PrepareTextureLoad(Texture& texture, PendingTextureLoad& pend
+@@ -394,7 +445,6 @@ bool TextureCache::PrepareTextureLoad(Texture& texture, PendingTextureLoad& pend
    pending_load_out.load_mips = mips_outdated;
    pending_range_count_out = 0;
  
@@ -3838,7 +3878,7 @@ index 76f5600..0d0a8c2 100644
    if (base_outdated) {
      PendingSharedMemoryRange pending_range;
      pending_range.start = texture_key.base_page << 12;
-@@ -492,6 +541,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -492,6 +542,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
      TextureBinding& binding = texture_bindings_[index];
      xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(index);
      TextureKey old_key = binding.key;
@@ -3846,7 +3886,7 @@ index 76f5600..0d0a8c2 100644
      uint8_t old_swizzled_signs = binding.swizzled_signs;
      BindingInfoFromFetchConstant(fetch, binding.key, &binding.swizzled_signs);
      texture_bindings_in_sync_ |= index_bit;
-@@ -504,16 +554,29 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -504,16 +555,29 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
      }
      uint32_t old_host_swizzle = binding.host_swizzle;
      binding.host_swizzle = GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(binding.key));
@@ -3877,7 +3917,7 @@ index 76f5600..0d0a8c2 100644
          any_sign_is_not_signed != any_sign_was_not_signed ||
          any_sign_is_signed != any_sign_was_signed) {
        bindings_changed |= index_bit;
-@@ -529,6 +592,10 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -529,6 +593,10 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
        if (any_sign_is_not_signed) {
          if (key_changed || !any_sign_was_not_signed) {
            binding.texture = FindOrCreateTexture(binding.key);
@@ -3888,7 +3928,7 @@ index 76f5600..0d0a8c2 100644
            load_unsigned_data = true;
          }
        } else {
-@@ -539,6 +606,9 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -539,6 +607,9 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
            TextureKey signed_key = binding.key;
            signed_key.signed_separate = 1;
            binding.texture_signed = FindOrCreateTexture(signed_key);
@@ -3898,7 +3938,7 @@ index 76f5600..0d0a8c2 100644
            load_signed_data = true;
          }
        } else {
-@@ -549,6 +619,9 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -549,6 +620,9 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
        // be different.
        if (key_changed) {
          binding.texture = FindOrCreateTexture(binding.key);
@@ -3908,6 +3948,14 @@ index 76f5600..0d0a8c2 100644
          load_unsigned_data = true;
        }
        binding.texture_signed = nullptr;
+@@ -756,6 +830,7 @@ void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& g
+ }
+ 
+ void TextureCache::DestroyAllTextures(bool from_destructor) {
++  texture_binding_reset_generation.fetch_add(1, std::memory_order_relaxed);
+   ResetTextureBindings(from_destructor);
+   textures_.clear();
+   COUNT_profile_set("gpu/texture_cache/textures", 0);
 diff --git a/src/graphics/pipeline/texture/info_formats.cpp b/src/graphics/pipeline/texture/info_formats.cpp
 index c456e1e..e97c6a0 100644
 --- a/src/graphics/pipeline/texture/info_formats.cpp
@@ -4124,7 +4172,7 @@ index ec0df7c..78a020a 100644
                                                      uint32_t length_allocations) {
    assert_always(
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 0c996bd..b539778 100644
+index 0c996bd..b8751f0 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -52,6 +52,10 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
@@ -4138,7 +4186,18 @@ index 0c996bd..b539778 100644
  REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
                      "Read data written by memory export in shaders on the CPU")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
-@@ -2307,8 +2311,6 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -65,6 +69,10 @@ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
+                     "Submit command buffer when PM4 primary buffer ends")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(prospero_reuse_texture_descriptors, false, "GPU/Vulkan",
++                    "Reuse unchanged texture and sampler descriptors within a frame")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "Use VK_KHR_dynamic_rendering for Vulkan GPU emulation when supported by the "
+                     "device (falls back to render passes otherwise)")
+@@ -2307,8 +2315,6 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
  
    SwapPostEffect swap_post_effect = GetActualSwapPostEffect();
  
@@ -4147,7 +4206,7 @@ index 0c996bd..b539778 100644
    uint32_t frontbuffer_width_scaled, frontbuffer_height_scaled;
    uint32_t frontbuffer_width_unscaled = 0, frontbuffer_height_unscaled = 0;
    xenos::TextureFormat frontbuffer_format;
-@@ -2320,9 +2322,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2320,9 +2326,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
      REXGPU_ERROR("XELOG_GPU PRESENT: swap_texture_view=NULL");
      return;
    }
@@ -4159,7 +4218,7 @@ index 0c996bd..b539778 100644
    auto get_active_swap_dimension = [](uint32_t packet_unscaled, uint32_t source_unscaled,
                                        uint32_t source_scaled) -> uint32_t {
      if (!source_scaled) {
-@@ -2408,6 +2409,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2408,6 +2413,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
    uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
    uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
@@ -4173,7 +4232,15 @@ index 0c996bd..b539778 100644
  
    presenter->RefreshGuestOutput(
        guest_output_width, guest_output_height, display_width, display_height,
-@@ -4037,6 +4045,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3904,6 +3916,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+         descriptor_sets_kept = std::min(
+             descriptor_sets_kept, uint32_t(SpirvShaderTranslator::kDescriptorSetTexturesPixel));
+       }
++      current_graphics_descriptor_sets_bound_up_to_date_ &= (UINT32_C(1) << descriptor_sets_kept) - 1;
+     } else {
+       // No or unknown pipeline layout previously bound - all bindings are in an
+       // indeterminate state.
+@@ -4037,6 +4050,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      }
    }
  
@@ -4184,7 +4251,7 @@ index 0c996bd..b539778 100644
    // Synchronize the memory pages backing memory scatter export streams, and
    // calculate the range that includes the streams for the buffer barrier.
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
-@@ -4401,7 +4413,8 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4401,7 +4418,8 @@ bool VulkanCommandProcessor::IssueCopy() {
    }
  
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
@@ -4194,7 +4261,7 @@ index 0c996bd..b539778 100644
      uint32_t written_address, written_length;
      return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
                                           written_address, written_length);
-@@ -4431,7 +4444,18 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4431,7 +4449,18 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
  
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
    if (readback_mode == ReadbackResolveMode::kDisabled) {
@@ -4214,6 +4281,139 @@ index 0c996bd..b539778 100644
    }
  
    auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
+@@ -6569,26 +6598,15 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+     sampler_count_pixel = 0;
+     texture_count_pixel = 0;
+   }
+-  // TODO(Triang3l): Reuse texture and sampler bindings if not changed.
++  // [crackdown] texture and sampler bindings are kept below when unchanged
+   current_graphics_descriptor_set_values_up_to_date_ &=
+       ~((UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex) |
+         (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
+ 
+-  // Make sure new descriptor sets are bound to the command buffer.
+-
+-  current_graphics_descriptor_sets_bound_up_to_date_ &=
+-      current_graphics_descriptor_set_values_up_to_date_;
+-
+   // Fill the texture and sampler write image infos.
+ 
+-  bool write_vertex_textures =
+-      (texture_count_vertex || sampler_count_vertex) &&
+-      !(current_graphics_descriptor_set_values_up_to_date_ &
+-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex));
+-  bool write_pixel_textures =
+-      (texture_count_pixel || sampler_count_pixel) &&
+-      !(current_graphics_descriptor_set_values_up_to_date_ &
+-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
++  bool write_vertex_textures = texture_count_vertex || sampler_count_vertex;
++  bool write_pixel_textures = texture_count_pixel || sampler_count_pixel;
+   descriptor_write_image_info_.clear();
+   descriptor_write_image_info_.reserve(
+       (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
+@@ -6634,6 +6652,78 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+     }
+   }
+ 
++  // Adapted from ChaosTheory1075/crackdown-ps5, ci/fw_perf_fixes.py.
++  // Keep identical texture bindings only within the same frame and cache generation.
++  const bool reuse_texture_descriptors = REXCVAR_GET(prospero_reuse_texture_descriptors);
++  auto texture_bindings_unchanged = [&](uint32_t stage, VkDescriptorSetLayout layout,
++                                        uint32_t texture_count, uint32_t sampler_count,
++                                        size_t texture_offset, size_t sampler_offset) {
++    const TextureBindingMemo& memo = texture_binding_memo_[stage];
++    const uint32_t set_index = stage ? uint32_t(SpirvShaderTranslator::kDescriptorSetTexturesPixel)
++                                     : uint32_t(SpirvShaderTranslator::kDescriptorSetTexturesVertex);
++    if (memo.frame != frame_current_ || memo.set == VK_NULL_HANDLE ||
++        memo.reset_generation !=
++            texture_binding_reset_generation.load(std::memory_order_relaxed) ||
++        current_graphics_descriptor_sets_[set_index] != memo.set || memo.layout != layout ||
++        memo.texture_count != texture_count || memo.sampler_count != sampler_count) {
++      return false;
++    }
++    for (uint32_t i = 0; i < texture_count; ++i) {
++      const VkDescriptorImageInfo& a = descriptor_write_image_info_[texture_offset + i];
++      const VkDescriptorImageInfo& b = memo.infos[i];
++      if (a.imageView != b.imageView || a.imageLayout != b.imageLayout) {
++        return false;
++      }
++    }
++    for (uint32_t i = 0; i < sampler_count; ++i) {
++      if (descriptor_write_image_info_[sampler_offset + i].sampler !=
++          memo.infos[texture_count + i].sampler) {
++        return false;
++      }
++    }
++    return true;
++  };
++  auto remember_texture_bindings = [&](uint32_t stage, VkDescriptorSet set,
++                                       VkDescriptorSetLayout layout, uint32_t texture_count,
++                                       uint32_t sampler_count, size_t texture_offset,
++                                       size_t sampler_offset) {
++    TextureBindingMemo& memo = texture_binding_memo_[stage];
++    memo.frame = frame_current_;
++    memo.reset_generation = texture_binding_reset_generation.load(std::memory_order_relaxed);
++    memo.set = set;
++    memo.layout = layout;
++    memo.texture_count = texture_count;
++    memo.sampler_count = sampler_count;
++    memo.infos.assign(descriptor_write_image_info_.begin() + texture_offset,
++                      descriptor_write_image_info_.begin() + texture_offset + texture_count);
++    memo.infos.insert(memo.infos.end(), descriptor_write_image_info_.begin() + sampler_offset,
++                      descriptor_write_image_info_.begin() + sampler_offset + sampler_count);
++  };
++  const VkDescriptorSetLayout textures_layout_vertex =
++      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_vertex_ref();
++  const VkDescriptorSetLayout textures_layout_pixel =
++      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_pixel_ref();
++  if (reuse_texture_descriptors && write_vertex_textures &&
++      texture_bindings_unchanged(0, textures_layout_vertex, texture_count_vertex,
++                                 sampler_count_vertex, vertex_texture_image_info_offset,
++                                 vertex_sampler_image_info_offset)) {
++    write_vertex_textures = false;
++    current_graphics_descriptor_set_values_up_to_date_ |=
++        UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
++  }
++  if (reuse_texture_descriptors && write_pixel_textures &&
++      texture_bindings_unchanged(1, textures_layout_pixel, texture_count_pixel,
++                                 sampler_count_pixel, pixel_texture_image_info_offset,
++                                 pixel_sampler_image_info_offset)) {
++    write_pixel_textures = false;
++    current_graphics_descriptor_set_values_up_to_date_ |=
++        UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
++  }
++
++  // Make sure new descriptor sets are bound to the command buffer.
++  current_graphics_descriptor_sets_bound_up_to_date_ &=
++      current_graphics_descriptor_set_values_up_to_date_;
++
+   // Write the new descriptor sets.
+ 
+   // Consecutive bindings updated via a single VkWriteDescriptorSet must have
+@@ -6698,6 +6788,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
+     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesVertex] =
+         write_textures[0].dstSet;
++    if (reuse_texture_descriptors) {
++      remember_texture_bindings(0, write_textures[0].dstSet, textures_layout_vertex,
++                                texture_count_vertex, sampler_count_vertex,
++                                vertex_texture_image_info_offset, vertex_sampler_image_info_offset);
++    }
+   }
+   // Pixel shader textures and samplers.
+   if (write_pixel_textures) {
+@@ -6715,6 +6810,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
+     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesPixel] =
+         write_textures[0].dstSet;
++    if (reuse_texture_descriptors) {
++      remember_texture_bindings(1, write_textures[0].dstSet, textures_layout_pixel,
++                                texture_count_pixel, sampler_count_pixel,
++                                pixel_texture_image_info_offset, pixel_sampler_image_info_offset);
++    }
+   }
+   // Write.
+   if (write_descriptor_set_count) {
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
 index 91ac08f..79a787f 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
