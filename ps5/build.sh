@@ -141,3 +141,6 @@ cmake -S "$template" -B "$title_build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DPS5_VULKAN_DIR="$PS5_VULKAN_DIR" \
     -DTITLE_GAME="$title_game" -DHELLS_GATE_SMOKE="$smoke"
 cmake --build "$title_build" --target link
+if [[ $mode == native-smoke ]]; then
+    cp "$root/ps5/sce_sys/icon0.png" "$template/dist/PPSA99343/sce_sys/icon0.png"
+fi
