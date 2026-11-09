@@ -4161,10 +4161,18 @@ index 26d554c..9d62173 100644
            rex::align(level_layout.row_pitch_bytes, xenos::kTextureLinearRowAlignmentBytes);
      }
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
-index ec0df7c..78a020a 100644
+index ec0df7c..84bbdf9 100644
 --- a/src/graphics/shared_memory.cpp
 +++ b/src/graphics/shared_memory.cpp
-@@ -254,6 +254,10 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last, bool inv
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <cstring>
++#include <span>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+@@ -254,6 +255,10 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last, bool inv
    }
  }
  
@@ -4175,7 +4183,7 @@ index ec0df7c..78a020a 100644
  void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
    if (length == 0 || start >= kBufferSize) {
      return;
-@@ -272,6 +276,34 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
+@@ -272,6 +277,34 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
    MakeRangeValid(start, length, true);
  }
  
@@ -4210,6 +4218,100 @@ index ec0df7c..78a020a 100644
  bool SharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
                                                      uint32_t length_allocations) {
    assert_always(
+@@ -342,46 +375,61 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+     return true;
+   }
+ 
+-  // Some texture or buffer is empty, for example - safe to draw in this case.
+-  std::vector<std::pair<uint32_t, uint32_t>> merged_ranges;
+-  merged_ranges.reserve(count);
+-  for (size_t i = 0; i < count; ++i) {
+-    uint32_t start = ranges[i].first;
+-    uint32_t length = ranges[i].second;
++  SCOPE_profile_cpu_f("gpu");
++
++  // Vertex and index draws commonly request one range. Use it directly
++  // after validation, with the same residency and upload path as a batch.
++  std::span<const std::pair<uint32_t, uint32_t>> merged_ranges;
++  std::vector<std::pair<uint32_t, uint32_t>> merged_storage;
++  if (count == 1) {
++    const auto& [start, length] = ranges[0];
+     if (!length) {
+-      continue;
++      return true;
+     }
+-    if (start > kBufferSize || (kBufferSize - start) < length) {
++    if (start > kBufferSize || kBufferSize - start < length) {
+       return false;
+     }
+-    merged_ranges.emplace_back(start, length);
+-  }
+-  if (merged_ranges.empty()) {
+-    return true;
+-  }
+-
+-  SCOPE_profile_cpu_f("gpu");
++    merged_ranges = {ranges, 1};
++  } else {
++    // Some texture or buffer is empty, for example - safe to draw in this case.
++    merged_storage.reserve(count);
++    for (size_t i = 0; i < count; ++i) {
++      uint32_t start = ranges[i].first;
++      uint32_t length = ranges[i].second;
++      if (!length) {
++        continue;
++      }
++      if (start > kBufferSize || (kBufferSize - start) < length) {
++        return false;
++      }
++      merged_storage.emplace_back(start, length);
++    }
++    if (merged_storage.empty()) {
++      return true;
++    }
+ 
+-  std::sort(merged_ranges.begin(), merged_ranges.end(),
+-            [](const std::pair<uint32_t, uint32_t>& a, const std::pair<uint32_t, uint32_t>& b) {
+-              return a.first < b.first;
+-            });
+-  size_t merged_write = 0;
+-  for (size_t i = 1; i < merged_ranges.size(); ++i) {
+-    std::pair<uint32_t, uint32_t>& range_previous = merged_ranges[merged_write];
+-    const std::pair<uint32_t, uint32_t>& range_current = merged_ranges[i];
+-    uint64_t previous_end = uint64_t(range_previous.first) + uint64_t(range_previous.second);
+-    uint64_t current_start = uint64_t(range_current.first);
+-    if (current_start <= previous_end) {
+-      uint64_t current_end = current_start + uint64_t(range_current.second);
+-      if (current_end > previous_end) {
+-        range_previous.second = uint32_t(current_end - uint64_t(range_previous.first));
++    std::sort(merged_storage.begin(), merged_storage.end(),
++              [](const std::pair<uint32_t, uint32_t>& a, const std::pair<uint32_t, uint32_t>& b) {
++                return a.first < b.first;
++              });
++    size_t merged_write = 0;
++    for (size_t i = 1; i < merged_storage.size(); ++i) {
++      std::pair<uint32_t, uint32_t>& range_previous = merged_storage[merged_write];
++      const std::pair<uint32_t, uint32_t>& range_current = merged_storage[i];
++      uint64_t previous_end = uint64_t(range_previous.first) + uint64_t(range_previous.second);
++      uint64_t current_start = uint64_t(range_current.first);
++      if (current_start <= previous_end) {
++        uint64_t current_end = current_start + uint64_t(range_current.second);
++        if (current_end > previous_end) {
++          range_previous.second = uint32_t(current_end - uint64_t(range_previous.first));
++        }
++      } else {
++        merged_storage[++merged_write] = range_current;
+       }
+-    } else {
+-      merged_ranges[++merged_write] = range_current;
+     }
++    merged_storage.resize(merged_write + 1);
++    merged_ranges = merged_storage;
+   }
+-  merged_ranges.resize(merged_write + 1);
+ 
+   for (const std::pair<uint32_t, uint32_t>& range : merged_ranges) {
+     if (!EnsureHostGpuMemoryAllocated(range.first, range.second)) {
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
 index 0c996bd..079fa4c 100644
 --- a/src/graphics/vulkan/command_processor.cpp
