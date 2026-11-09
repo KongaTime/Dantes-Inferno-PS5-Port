@@ -521,6 +521,25 @@ index 7b938b9..fd1b380 100644
    // Thread for asynchronous writing to the storage streams.
    void StorageWriteThread();
    std::mutex storage_write_request_lock_;
+diff --git a/include/rex/graphics/vulkan/texture_cache.h b/include/rex/graphics/vulkan/texture_cache.h
+index 04856ee..2d811a7 100644
+--- a/include/rex/graphics/vulkan/texture_cache.h
++++ b/include/rex/graphics/vulkan/texture_cache.h
+@@ -375,6 +375,14 @@ class VulkanTextureCache final : public TextureCache {
+ 
+   xenos::AnisoFilter max_anisotropy_;
+ 
++#if REX_PLATFORM_PS5
++  struct RecentSampler {
++    uint64_t submission = 0;
++    VkSampler sampler = VK_NULL_HANDLE;
++    uint32_t key = 0;
++  };
++  std::array<RecentSampler, 64> recent_samplers_{};
++#endif
+   std::unordered_map<SamplerParameters, Sampler, SamplerParameters::Hasher> samplers_;
+   std::pair<const SamplerParameters, Sampler>* sampler_used_first_ = nullptr;
+   std::pair<const SamplerParameters, Sampler>* sampler_used_last_ = nullptr;
 diff --git a/include/rex/input/device.h b/include/rex/input/device.h
 index 22f7804..1aca0e1 100644
 --- a/include/rex/input/device.h
@@ -4762,6 +4781,69 @@ index 91ac08f..79a787f 100644
 +      fwrite(spv_record.data(), spv_record.size(), 1, spv_storage_file_);
 +    }
    }
+ }
+ 
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index ecbd940..67d5b55 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -35,6 +35,11 @@
+ 
+ REXCVAR_DEFINE_BOOL(non_seamless_cube_map, false, "GPU", "Use non-seamless cube map sampling");
+ 
++#if REX_PLATFORM_PS5
++REXCVAR_DEFINE_BOOL(ps5_recent_sampler_cache, false, "GPU",
++                    "Reuse Vulkan sampler lookups within the current submission");
++#endif
++
+ namespace rex::graphics::vulkan {
+ 
+ // Generated with `xb buildshaders`.
+@@ -762,6 +767,22 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters, bool& has
+   assert_true(command_processor_.submission_open());
+   uint64_t submission_current = command_processor_.GetCurrentSubmission();
+ 
++#if REX_PLATFORM_PS5
++  RecentSampler* recent_sampler = nullptr;
++  if (REXCVAR_GET(ps5_recent_sampler_cache)) {
++    // Sampler keys are packed bitfields. Mix the full key to spread states
++    // that differ only in filtering or LOD across the cache.
++    const uint32_t slot = (parameters.value * UINT32_C(2654435761)) >> 26;
++    recent_sampler = &recent_samplers_[slot];
++    // The owning cache cannot evict a sampler used by the open submission.
++    if (recent_sampler->submission == submission_current &&
++        recent_sampler->key == parameters.value && recent_sampler->sampler != VK_NULL_HANDLE) {
++      has_overflown_out = false;
++      return recent_sampler->sampler;
++    }
++  }
++#endif
++
+   // Try to find an existing sampler.
+   auto it_existing = samplers_.find(parameters);
+   if (it_existing != samplers_.end()) {
+@@ -785,6 +806,11 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters, bool& has
+       }
+     }
+     has_overflown_out = false;
++#if REX_PLATFORM_PS5
++    if (recent_sampler) {
++      *recent_sampler = {submission_current, sampler.second.sampler, parameters.value};
++    }
++#endif
+     return sampler.second.sampler;
+   }
+ 
+@@ -957,6 +983,11 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters, bool& has
+     sampler_used_first_ = &new_sampler;
+   }
+   sampler_used_last_ = &new_sampler;
++#if REX_PLATFORM_PS5
++  if (recent_sampler) {
++    *recent_sampler = {submission_current, vulkan_sampler, parameters.value};
++  }
++#endif
+   return vulkan_sampler;
  }
  
 diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
