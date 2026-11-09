@@ -1,5 +1,9 @@
 #include "renderdoc_capture.h"
 
+#if defined(__PROSPERO__)
+void renderer::RenderDocOnGuestSwap() {}
+#else
+
 #include <rex/cvar.h>
 #include <rex/logging/macros.h>
 
@@ -61,3 +65,5 @@ void RenderDocOnGuestSwap() {
 }
 
 }  // namespace renderer
+
+#endif

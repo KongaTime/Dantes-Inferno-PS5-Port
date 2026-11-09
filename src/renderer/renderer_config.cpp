@@ -3,7 +3,9 @@
 #include <rex/cvar.h>
 #include <rex/logging/macros.h>
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <cstdlib>
@@ -77,10 +79,11 @@ void ApplyNativeRenderScale() {
     // The guest always renders a 720p-class frame; pick the integer scale
     // that best matches the target display height, rounding up so
     // non-integer ratios supersample rather than undersample.
-    const bool fullscreen = rex::cvar::Query<bool>("fullscreen");
     const int window_height = rex::cvar::Query<int32_t>("window_height");
-    const int target_height =
-        fullscreen ? GetSystemMetrics(SM_CYSCREEN) : (window_height > 0 ? window_height : 720);
+    int target_height = window_height > 0 ? window_height : 720;
+#if defined(_WIN32)
+    if (rex::cvar::Query<bool>("fullscreen")) target_height = GetSystemMetrics(SM_CYSCREEN);
+#endif
     scale = (target_height + 359) / 720;
   } else {
     scale = std::atoi(mode.c_str());

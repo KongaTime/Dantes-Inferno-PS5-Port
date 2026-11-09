@@ -1357,11 +1357,13 @@ bool Start(rex::ui::Window* window, const std::filesystem::path& cache_dir) {
   std::lock_guard lock(g_mutex);
   if (g_device) return true;
   void* hwnd = window ? window->GetNativeWindowHandle() : nullptr;
+#if !REX_PLATFORM_PS5
   if (!hwnd) {
     REXLOG_ERROR("DanteDevice: no game window");
     return false;
   }
-  window->SetPresenter(nullptr);
+#endif
+  if (window) window->SetPresenter(nullptr);
   auto device = std::make_unique<VulkanDevice>();
   if (!device->Initialize(hwnd, 1280, 720)) {
     REXLOG_ERROR("DanteDevice: native device initialization failed");

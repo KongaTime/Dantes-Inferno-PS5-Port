@@ -20,10 +20,15 @@
 #include "Common/interface/RefCntAutoPtr.hpp"
 
 #include <rex/logging/macros.h>
+#include <rex/platform.h>
 
+#if REX_PLATFORM_PS5
+#include "ps5_native_spirv.h"
+#else
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/Include/ResourceLimits.h>
 #include <SPIRV/GlslangToSpv.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -34,9 +39,11 @@
 // Shaders are compiled to SPIR-V here with the SDK's glslang instead.
 // DefaultTBuiltInResource lives in StandAlone/ResourceLimits.cpp (compiled
 // into this target); glslang's public headers only declare TBuiltInResource.
+#if !REX_PLATFORM_PS5
 namespace glslang {
 extern const TBuiltInResource DefaultTBuiltInResource;
 }
+#endif
 
 namespace renderer {
 
@@ -156,13 +163,21 @@ bool VulkanDevice::Initialize(void* hwnd, uint32_t width, uint32_t height) {
   Diligent::SwapChainDesc sc_desc;
   sc_desc.Width = width;
   sc_desc.Height = height;
+#if REX_PLATFORM_PS5
+  sc_desc.ColorBufferFormat = Diligent::TEX_FORMAT_BGRA8_UNORM;
+#else
   sc_desc.ColorBufferFormat = Diligent::TEX_FORMAT_RGBA8_UNORM;
+#endif
   sc_desc.DepthBufferFormat = Diligent::TEX_FORMAT_D32_FLOAT;
   sc_desc.BufferCount = 3;
   sc_desc.DefaultDepthValue = 1.0f;
   sc_desc.IsPrimary = true;
 
+#if REX_PLATFORM_PS5
+  Diligent::NativeWindow native_window{};
+#else
   Diligent::NativeWindow native_window(hwnd);
+#endif
 
   impl_->factory->CreateSwapChainVk(impl_->device, impl_->context, sc_desc, native_window,
                                     &impl_->swapchain);
@@ -237,6 +252,7 @@ void main() {
 }
 )";
 
+#if !REX_PLATFORM_PS5
 static bool CompileGlslToSpirv(const char* source, EShLanguage stage,
                                std::vector<uint32_t>& out_spirv) {
   static const bool glslang_ready = [] { return glslang::InitializeProcess(); }();
@@ -270,14 +286,23 @@ static bool CompileGlslToSpirv(const char* source, EShLanguage stage,
   glslang::GlslangToSpv(*program.getIntermediate(stage), out_spirv);
   return !out_spirv.empty();
 }
+#endif
 
 static Diligent::IShader* CreateShader(Diligent::IRenderDevice* device, const char* source,
                                        Diligent::SHADER_TYPE type, const char* name) {
+#if REX_PLATFORM_PS5
+  const auto spirv = FindPs5Spirv(source);
+  if (spirv.empty()) {
+    REXLOG_ERROR("VulkanDevice: no PS5 bytecode for shader {}", name);
+    return nullptr;
+  }
+#else
   std::vector<uint32_t> spirv;
   if (!CompileGlslToSpirv(
           source, type == Diligent::SHADER_TYPE_VERTEX ? EShLangVertex : EShLangFragment, spirv)) {
     return nullptr;
   }
+#endif
   Diligent::ShaderCreateInfo ci;
   ci.ByteCode = spirv.data();
   ci.ByteCodeSize = spirv.size() * sizeof(uint32_t);

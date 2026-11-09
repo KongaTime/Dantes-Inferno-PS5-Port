@@ -3,8 +3,8 @@ set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 mode=${1:-smoke}
-if [[ $# -gt 1 || ! $mode =~ ^(runtime|host|codegen|native-deps|native-smoke|smoke|game)$ ]]; then
-    echo "Usage: bash ps5/build.sh [runtime|host|codegen|native-deps|native-smoke|smoke|game]" >&2
+if [[ $# -gt 1 || ! $mode =~ ^(runtime|host|codegen|native-deps|native-smoke|native-game|smoke|game)$ ]]; then
+    echo "Usage: bash ps5/build.sh [runtime|host|codegen|native-deps|native-smoke|native-game|smoke|game]" >&2
     exit 2
 fi
 
@@ -27,7 +27,7 @@ if [[ $mode == codegen ]]; then
     exit
 fi
 
-if [[ $mode == game && ! -s $root/generated/default/sources.cmake ]]; then
+if [[ $mode =~ ^(game|native-game)$ && ! -s $root/generated/default/sources.cmake ]]; then
     fail "Missing recompiled guest sources. Run: bash ps5/build.sh codegen"
 fi
 
@@ -114,11 +114,13 @@ fi
 template="$build/title-template"
 title_build="$build/title"
 title_game="$root/ps5"
-if [[ $mode == native-smoke ]]; then
+native_game=OFF
+if [[ $mode == native-smoke || $mode == native-game ]]; then
     template="$build/native-title-template"
     title_build="$build/native-title"
     title_game="$root/ps5/native-smoke"
     export HELLS_GATE_DILIGENT_ROOT="$build"
+    [[ $mode != native-game ]] || native_game=ON
 fi
 if [[ ! -d $template ]]; then
     git clone --no-hardlinks "$PS5_REXGLUE_TEMPLATE" "$template"
@@ -139,8 +141,8 @@ smoke=OFF
 [[ $mode != smoke ]] || smoke=ON
 cmake -S "$template" -B "$title_build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DPS5_VULKAN_DIR="$PS5_VULKAN_DIR" \
-    -DTITLE_GAME="$title_game" -DHELLS_GATE_SMOKE="$smoke"
+    -DTITLE_GAME="$title_game" -DHELLS_GATE_SMOKE="$smoke" -DHELLS_GATE_NATIVE_GAME="$native_game"
 cmake --build "$title_build" --target link
-if [[ $mode == native-smoke ]]; then
+if [[ $mode == native-smoke || $mode == native-game ]]; then
     cp "$root/ps5/sce_sys/icon0.png" "$template/dist/PPSA99343/sce_sys/icon0.png"
 fi

@@ -17,6 +17,12 @@ After building the PS5 runtime, build it with `bash ps5/build.sh native-deps`
 and `bash ps5/build.sh native-smoke`. The package is under
 `native-title-template/dist/PPSA99343` inside the build directory.
 
+With recompiled game sources and the host `glslangValidator` installed,
+`bash ps5/build.sh native-game` builds the experimental game executable for the
+same test title. It uses DiligentCore for draw calls and a headless Xenos command
+processor for guest GPU synchronization. Supply the game files in `gamedata/`
+or set `game_data_root` in the test title's `dantes_inferno.toml`.
+
 ## Build on Linux or WSL
 
 Requirements are CMake, Ninja, Clang 21, Python 3, and the checked-out PS5

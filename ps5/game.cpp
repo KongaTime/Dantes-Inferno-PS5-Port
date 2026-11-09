@@ -11,10 +11,24 @@
 #include <rex/runtime.h>
 #include <rex/system/xmemory.h>
 
+#if HELLS_GATE_PS5_NATIVE_GAME
+#include "renderer/renderer.h"
+#include "renderer/renderer_config.h"
+#endif
+
 extern "C" [[noreturn]] void catchReturnFromMain(int status);
 extern "C" void title_note(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
 namespace {
+
+#if HELLS_GATE_PS5_NATIVE_GAME
+class SyncOnlyGraphics final : public rex::graphics::vulkan::VulkanGraphicsSystem {
+ public:
+  rex::X_STATUS SetupPresentation(rex::ui::WindowedAppContext*) override {
+    return 0;
+  }
+};
+#endif
 
 class HellsGateApp final : public rex::ReXApp {
  public:
@@ -26,7 +40,13 @@ class HellsGateApp final : public rex::ReXApp {
   explicit HellsGateApp(rex::ui::WindowedAppContext& context)
       : ReXApp(context, "dantes_inferno", PPCImageConfig) {}
 
-  void OnConfigurePaths(rex::PathConfig& paths) override {
+  std::optional<rex::PathConfig> OnFinalizePaths(
+      const rex::PathConfig& defaults, std::function<void(rex::PathConfig)>) override {
+    auto paths = defaults;
+    const auto configured_game_data = rex::cvar::Query<std::string>("game_data_root");
+    if (!configured_game_data.empty()) {
+      paths.game_data_root = configured_game_data;
+    }
     if (paths.game_data_root.empty()) {
       paths.game_data_root = "/app0/gamedata";
     }
@@ -38,6 +58,7 @@ class HellsGateApp final : public rex::ReXApp {
         catchReturnFromMain(1);
       }
     }
+    return paths;
   }
 
   void OnPreSetup(rex::RuntimeConfig& config) override {
@@ -45,8 +66,30 @@ class HellsGateApp final : public rex::ReXApp {
     if (rex::cvar::GetFlagSource("vfetch_oob_trace") == rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName("vfetch_oob_trace", "false");
     }
+#if HELLS_GATE_PS5_NATIVE_GAME
+    rex::cvar::SetFlagByName("renderer", "dante");
+    rex::cvar::SetFlagByName("dante_resolution", "1280x720");
+    renderer::ConfigureSyncOnlyGpu();
+    config.graphics = std::make_unique<SyncOnlyGraphics>();
+#else
     config.graphics = std::make_unique<rex::graphics::vulkan::VulkanGraphicsSystem>();
+#endif
   }
+
+#if HELLS_GATE_PS5_NATIVE_GAME
+  void OnPostSetup() override {
+    title_note("native game: starting Diligent renderer");
+    if (!renderer::Start(window(), cache_root())) {
+      title_note("native game: FAIL renderer startup");
+      catchReturnFromMain(1);
+    }
+    title_note("native game: renderer ready");
+  }
+
+  void OnShutdown() override {
+    renderer::Stop();
+  }
+#endif
 
   void OnPreLaunchModule() override {
     auto* memory = runtime()->memory()->virtual_membase();

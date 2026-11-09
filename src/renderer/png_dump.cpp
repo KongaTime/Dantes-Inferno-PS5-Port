@@ -27,7 +27,11 @@
 
 #define STB_IMAGE_WRITE_STATIC
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+#if defined(__PROSPERO__)
+#include "stb_image_write.h"
+#else
 #include "../../thirdparty/diligent-core/ThirdParty/stb/stb_image_write.h"
+#endif
 
 namespace renderer {
 namespace {

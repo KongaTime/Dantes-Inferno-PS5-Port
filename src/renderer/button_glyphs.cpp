@@ -1,5 +1,18 @@
 #include "button_glyphs.h"
 
+#if defined(__PROSPERO__)
+namespace renderer {
+struct ButtonGlyphs::Impl {};
+ButtonGlyphs::ButtonGlyphs(Diligent::IRenderDevice*) {}
+ButtonGlyphs::~ButtonGlyphs() = default;
+void ButtonGlyphs::SetStyle(GlyphStyle) {}
+void ButtonGlyphs::SetBindings(const KeyBindings&) {}
+Diligent::ITexture* ButtonGlyphs::Replace(uint64_t, const TextureCache::LoadedTexture*) {
+  return nullptr;
+}
+}  // namespace renderer
+#else
+
 #include "Common/interface/RefCntAutoPtr.hpp"
 #include "Graphics/GraphicsEngine/interface/RenderDevice.h"
 #include "Graphics/GraphicsEngine/interface/Texture.h"
@@ -1994,3 +2007,5 @@ dl::ITexture* ButtonGlyphs::Replace(uint64_t content_hash,
 }
 
 }  // namespace renderer
+
+#endif
