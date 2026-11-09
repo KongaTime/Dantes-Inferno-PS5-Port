@@ -5326,6 +5326,113 @@ index 91ac08f..79a787f 100644
    }
  }
  
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index 6788214..4926654 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cstring>
+ #include <utility>
+ #include <vector>
+@@ -27,6 +28,10 @@ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
+                     "Use sparse shared memory on Vulkan")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++#if REX_PLATFORM_PS5
++REXCVAR_DECLARE(bool, ps5_profile_residency_pages);
++#endif
++
+ namespace rex::graphics::vulkan {
+ 
+ VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
+@@ -273,6 +278,29 @@ bool VulkanSharedMemory::UploadRanges(
+   if (upload_page_ranges.empty()) {
+     return true;
+   }
++#if REX_PLATFORM_PS5
++  using Clock = std::chrono::steady_clock;
++  using Microseconds = std::chrono::duration<double, std::micro>;
++  struct UploadTiming {
++    Clock::time_point window_start{};
++    unsigned countdown = 0;
++    unsigned samples = 0;
++    uint64_t bytes = 0;
++    double watch_us = 0;
++    double copy_us = 0;
++    double other_us = 0;
++  };
++  static thread_local UploadTiming timing;
++  const bool sampled = REXCVAR_GET(ps5_profile_residency_pages) && timing.countdown-- == 0;
++  Clock::time_point start{};
++  double watch_us = 0;
++  double copy_us = 0;
++  uint64_t bytes = 0;
++  if (sampled) {
++    timing.countdown = 30;
++    start = Clock::now();
++  }
++#endif
+   // upload_page_ranges are sorted, use them to determine the range for the
+   // ordering barrier.
+   Use(Usage::kTransferDestination,
+@@ -300,10 +328,24 @@ bool VulkanSharedMemory::UploadRanges(
+         successful = false;
+         break;
+       }
++#if REX_PLATFORM_PS5
++      const auto watch_start = sampled ? Clock::now() : Clock::time_point{};
++#endif
+       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
++#if REX_PLATFORM_PS5
++      const auto copy_start = sampled ? Clock::now() : Clock::time_point{};
++#endif
+       std::memcpy(upload_buffer_mapping,
+                   memory().TranslatePhysical(upload_range_start << page_size_log2()),
+                   upload_buffer_size);
++#if REX_PLATFORM_PS5
++      if (sampled) {
++        const auto copy_end = Clock::now();
++        watch_us += Microseconds(copy_start - watch_start).count();
++        copy_us += Microseconds(copy_end - copy_start).count();
++        bytes += upload_buffer_size;
++      }
++#endif
+       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
+         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
+         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
+@@ -329,6 +371,28 @@ bool VulkanSharedMemory::UploadRanges(
+                                    uint32_t(upload_regions_.size()), upload_regions_.data());
+     upload_regions_.clear();
+   }
++#if REX_PLATFORM_PS5
++  if (sampled) {
++    const auto end = Clock::now();
++    if (!timing.samples) {
++      timing.window_start = start;
++    }
++    ++timing.samples;
++    timing.bytes += bytes;
++    timing.watch_us += watch_us;
++    timing.copy_us += copy_us;
++    timing.other_us += Microseconds(end - start).count() - watch_us - copy_us;
++    if (end - timing.window_start >= std::chrono::seconds(5)) {
++      REXGPU_INFO("PS5 upload detail: {} samples, mean bytes {}, mean us per upload: "
++                  "page tracking {:.2f}, memcpy {:.2f}, staging/commands {:.2f}",
++                  timing.samples, timing.bytes / timing.samples,
++                  timing.watch_us / timing.samples, timing.copy_us / timing.samples,
++                  timing.other_us / timing.samples);
++      timing = {};
++      timing.countdown = 30;
++    }
++  }
++#endif
+   return successful;
+ }
+ 
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
 index ecbd940..67d5b55 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
