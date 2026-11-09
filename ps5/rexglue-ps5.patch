@@ -436,20 +436,24 @@ index b7f66e2..f3cb5e6 100644
    uint32_t bytes_per_block() const { return block_width * block_height * bits_per_pixel / 8; }
  
 diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
-index 4d85a2b..2f5c8cf 100644
+index 4d85a2b..7380695 100644
 --- a/include/rex/graphics/shared_memory.h
 +++ b/include/rex/graphics/shared_memory.h
-@@ -79,6 +79,9 @@ class SharedMemory {
+@@ -78,6 +78,13 @@ class SharedMemory {
+   // the range has been fully updated and is usable.
    bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
    bool RequestRange(uint32_t start, uint32_t length);
- 
++#if REX_PLATFORM_PS5
++  // The range can be used without allocating or uploading shared memory.
++  bool TryUseResidentRange(uint32_t start, uint32_t length);
++#endif
++
 +  // Whether every page in the range is valid in the host GPU memory copy.
 +  bool IsRangeValid(uint32_t start, uint32_t length) const;
-+
+ 
    // Marks the range and, if not exact_range, potentially its surroundings
    // (to up to the first GPU-written page, as an access violation exception
-   // count optimization) as modified by the CPU, also invalidating GPU-written
-@@ -95,6 +98,9 @@ class SharedMemory {
+@@ -95,6 +102,9 @@ class SharedMemory {
    // regions in those pages.
    void RangeWrittenByGpu(uint32_t start, uint32_t length);
  
@@ -4247,7 +4251,7 @@ index 26d554c..9d62173 100644
            rex::align(level_layout.row_pitch_bytes, xenos::kTextureLinearRowAlignmentBytes);
      }
 diff --git a/src/graphics/primitive_processor.cpp b/src/graphics/primitive_processor.cpp
-index d49e9c3..12d0880 100644
+index d49e9c3..a318cdf 100644
 --- a/src/graphics/primitive_processor.cpp
 +++ b/src/graphics/primitive_processor.cpp
 @@ -10,6 +10,7 @@
@@ -4258,12 +4262,15 @@ index d49e9c3..12d0880 100644
  #include <cstring>
  #include <functional>
  #include <utility>
-@@ -83,8 +84,90 @@ REXCVAR_DEFINE_INT32(primitive_processor_cache_min_indices, 0, "GPU",
+@@ -83,8 +84,94 @@ REXCVAR_DEFINE_INT32(primitive_processor_cache_min_indices, 0, "GPU",
  //     "Negative values disable caching.",
  //     "GPU");
  
 +#if REX_PLATFORM_PS5
 +REXCVAR_DECLARE(bool, ps5_profile_draw_phases);
++REXCVAR_DEFINE_BOOL(ps5_fast_index_residency, false, "GPU/PS5",
++                    "Use the existing validity bitmap before preparing index buffer uploads")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +#endif
 +
  namespace rex::graphics {
@@ -4277,6 +4284,7 @@ index d49e9c3..12d0880 100644
 +  unsigned countdown = 0;
 +  unsigned draws = 0;
 +  unsigned residency_requests = 0;
++  unsigned residency_fast_hits = 0;
 +  unsigned cache_hits = 0;
 +  unsigned cache_misses = 0;
 +  unsigned converted_draws = 0;
@@ -4329,10 +4337,10 @@ index d49e9c3..12d0880 100644
 +    timing.total_us += PrimitiveMicroseconds(end - start_).count();
 +    if (end - timing.window_start >= std::chrono::seconds(5)) {
 +      REXGPU_INFO("PS5 primitive detail: {} samples, {} residency requests, {} cache hits, "
-+                  "{} misses, {} converted draws, mean us per primitive: "
++                  "{} misses, {} converted draws, {} residency fast hits, mean us per primitive: "
 +                  "residency {:.2f}, conversion cache {:.2f}, other {:.2f}",
 +                  timing.draws, timing.residency_requests, timing.cache_hits,
-+                  timing.cache_misses, timing.converted_draws,
++                  timing.cache_misses, timing.converted_draws, timing.residency_fast_hits,
 +                  timing.residency_us / timing.draws, timing.cache_us / timing.draws,
 +                  (timing.total_us - timing.residency_us - timing.cache_us) / timing.draws);
 +      timing = {};
@@ -4349,7 +4357,7 @@ index d49e9c3..12d0880 100644
  // SIMD processing here assumes that alignment is not required (neither AVX nor
  // Neon requires it) and there's no punishment for using an unaligned access
  // instruction when the data is actually aligned (AVX has separate aligned /
-@@ -278,6 +361,9 @@ void PrimitiveProcessor::ClearPerFrameCache() {
+@@ -278,6 +365,9 @@ void PrimitiveProcessor::ClearPerFrameCache() {
  
  bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
    SCOPE_profile_cpu_f("gpu");
@@ -4359,20 +4367,32 @@ index d49e9c3..12d0880 100644
  
    const RegisterFile& regs = register_file_;
    auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
-@@ -911,6 +997,12 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
+@@ -910,8 +1000,22 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
+   if (cacheable.index_buffer_type == ProcessedIndexBufferType::kGuestDMA ||
        cacheable.index_buffer_type == ProcessedIndexBufferType::kHostBuiltinForDMA) {
      // Request the index buffer memory.
-     // TODO(Triang3l): Shared memory request cache.
+-    // TODO(Triang3l): Shared memory request cache.
+-    if (!shared_memory_.RequestRange(guest_index_base, guest_index_buffer_needed_bytes)) {
++    bool resident = false;
 +#if REX_PLATFORM_PS5
 +    if (primitive_timing.active) {
 +      ++primitive_timing.residency_requests;
 +    }
 +    ScopedPrimitivePart residency_sample(primitive_timing.residency_us);
++    if (REXCVAR_GET(ps5_fast_index_residency)) {
++      resident = shared_memory_.TryUseResidentRange(guest_index_base,
++                                                    guest_index_buffer_needed_bytes);
++      if (resident && primitive_timing.active) {
++        ++primitive_timing.residency_fast_hits;
++      }
++    }
 +#endif
-     if (!shared_memory_.RequestRange(guest_index_base, guest_index_buffer_needed_bytes)) {
++    if (!resident &&
++        !shared_memory_.RequestRange(guest_index_base, guest_index_buffer_needed_bytes)) {
        REXGPU_ERROR(
            "PrimitiveProcessor: Failed to request index buffer 0x{:08X}, 0x{:X} "
-@@ -920,6 +1012,12 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
+           "bytes needed, in the shared memory",
+@@ -920,6 +1024,12 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
      }
    }
  
@@ -4385,7 +4405,7 @@ index d49e9c3..12d0880 100644
    result_out.guest_primitive_type = guest_primitive_type;
    result_out.host_primitive_type = host_primitive_type;
    result_out.host_vertex_shader_type = host_vertex_shader_type;
-@@ -1326,6 +1424,9 @@ uint32_t PrimitiveProcessor::GetMultiPrimitiveHostIndexCountAndRanges(
+@@ -1326,6 +1436,9 @@ uint32_t PrimitiveProcessor::GetMultiPrimitiveHostIndexCountAndRanges(
  
  PrimitiveProcessor::CacheTransaction::CacheTransaction(PrimitiveProcessor& processor, CacheKey key)
      : processor_(processor), key_(key) {
@@ -4395,7 +4415,7 @@ index d49e9c3..12d0880 100644
    assert_zero(processor_.cache_currently_processing_size_bytes_);
    if (REXCVAR_GET(primitive_processor_cache_min_indices) < 0 ||
        key_.count < uint32_t(REXCVAR_GET(primitive_processor_cache_min_indices))) {
-@@ -1351,6 +1452,15 @@ PrimitiveProcessor::CacheTransaction::CacheTransaction(PrimitiveProcessor& proce
+@@ -1351,6 +1464,15 @@ PrimitiveProcessor::CacheTransaction::CacheTransaction(PrimitiveProcessor& proce
        processor_.cache_currently_processing_size_bytes_ = size_bytes;
      }
    }
@@ -4411,7 +4431,7 @@ index d49e9c3..12d0880 100644
    if (result_type_ != ResultType::kExisting) {
      // Enable the invalidation callback before reading the indices.
      // Also, only enable invalidation callbacks if anything needed processing at
-@@ -1369,6 +1479,9 @@ PrimitiveProcessor::CacheTransaction::~CacheTransaction() {
+@@ -1369,6 +1491,9 @@ PrimitiveProcessor::CacheTransaction::~CacheTransaction() {
    if (!key_.count || result_type_ == ResultType::kExisting) {
      return;
    }
@@ -4422,7 +4442,7 @@ index d49e9c3..12d0880 100644
    std::lock_guard<std::mutex> cache_lock(processor_.cache_mutex_);
  
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
-index ec0df7c..1e5dacc 100644
+index ec0df7c..a15fb02 100644
 --- a/src/graphics/shared_memory.cpp
 +++ b/src/graphics/shared_memory.cpp
 @@ -10,18 +10,54 @@
@@ -4684,7 +4704,36 @@ index ec0df7c..1e5dacc 100644
    COUNT_profile_set("gpu/shared_memory/request_ranges_count", uint32_t(count));
    COUNT_profile_set("gpu/shared_memory/request_ranges_merged_count",
                      uint32_t(merged_ranges.size()));
-@@ -494,6 +627,11 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+@@ -468,6 +601,28 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+   return UploadRanges(upload_ranges_);
+ }
+ 
++#if REX_PLATFORM_PS5
++bool SharedMemory::TryUseResidentRange(uint32_t start, uint32_t length) {
++  if (!length) {
++    return true;
++  }
++  if (start > kBufferSize || kBufferSize - start < length) {
++    return false;
++  }
++  if (host_gpu_memory_sparse_granularity_log2_ != UINT32_MAX) {
++    const uint32_t shift = host_gpu_memory_sparse_granularity_log2_;
++    const uint32_t first = start >> shift;
++    const uint32_t last = (start + length - 1) >> shift;
++    if (rex::bit::GetNextRangeUnset(host_gpu_memory_sparse_allocated_.data(),
++                                     first, last - first + 1).second) {
++      return false;
++    }
++  }
++  auto lock = global_critical_region_.Acquire();
++  return IsRangeValid(start, length);
++}
++#endif
++
+ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
+   std::pair<uint32_t, uint32_t> range(start, length);
+   return RequestRanges(&range, 1);
+@@ -494,6 +649,11 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
  
    auto global_lock = global_critical_region_.Acquire();
  
