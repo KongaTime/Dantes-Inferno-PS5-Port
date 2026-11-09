@@ -10,6 +10,12 @@ The smoke app uses the same PS5 runtime and graphics libraries. It opens a
 window, reads back a sentinel from the Xbox 360 guest heap, and initializes the
 Xenos/RADV presenter without Xbox 360 game files.
 
+The separate native-renderer smoke title (`PPSA99343`) creates a DiligentCore
+Vulkan device through RADV and submits an offscreen clear. It uses no game data.
+After building the PS5 runtime, build it with `bash ps5/build.sh native-deps`
+and `bash ps5/build.sh native-smoke`. The package is under
+`native-title-template/dist/PPSA99343` inside the build directory.
+
 ## Build on Linux or WSL
 
 Requirements are CMake, Ninja, Clang 21, Python 3, and the checked-out PS5

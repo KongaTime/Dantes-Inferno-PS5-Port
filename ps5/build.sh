@@ -3,8 +3,8 @@ set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 mode=${1:-smoke}
-if [[ $# -gt 1 || ! $mode =~ ^(runtime|host|codegen|smoke|game)$ ]]; then
-    echo "Usage: bash ps5/build.sh [runtime|host|codegen|smoke|game]" >&2
+if [[ $# -gt 1 || ! $mode =~ ^(runtime|host|codegen|native-deps|native-smoke|smoke|game)$ ]]; then
+    echo "Usage: bash ps5/build.sh [runtime|host|codegen|native-deps|native-smoke|smoke|game]" >&2
     exit 2
 fi
 
@@ -69,6 +69,35 @@ fi
 : "${PS5_PAYLOAD_SDK:?Set PS5_PAYLOAD_SDK to the installed payload SDK with the PS5 platform layer}"
 toolchain="$PS5_PAYLOAD_SDK/toolchain/prospero.cmake"
 [[ -f $toolchain ]] || fail "Missing $toolchain"
+if [[ $mode == native-deps ]]; then
+    diligent="$build/diligent-core"
+    diligent_pin=2c81c11ab3e293f3a54c13c6fec5b4b3dae5b974
+    if [[ ! -e $diligent ]]; then
+        git init "$diligent"
+        git -C "$diligent" remote add origin https://github.com/DiligentGraphics/DiligentCore.git
+    fi
+    if ! git -C "$diligent" rev-parse --verify HEAD >/dev/null 2>&1; then
+        git -C "$diligent" fetch --depth 1 origin "$diligent_pin"
+        git -C "$diligent" switch --detach FETCH_HEAD
+    fi
+    [[ $(git -C "$diligent" rev-parse HEAD) == "$diligent_pin" ]] ||
+        fail "DiligentCore must be an isolated checkout at $diligent_pin"
+    for patch in "$root/patches/diligent/diligent-core.patch" "$root/ps5/diligent-core-ps5.patch"; do
+        if ! git -C "$diligent" apply --reverse --check "$patch" 2>/dev/null; then
+            git -C "$diligent" apply "$patch"
+        fi
+    done
+    git -C "$diligent" submodule update --init --depth 1 --jobs 5 \
+        ThirdParty/{SPIRV-Cross,SPIRV-Headers,Vulkan-Headers,volk,xxHash}
+    cmake -S "$diligent" -B "$build/diligent-ps5" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
+        -DDILIGENT_NO_OPENGL=ON -DDILIGENT_NO_WEBGPU=ON -DDILIGENT_NO_ARCHIVER=ON \
+        -DDILIGENT_NO_HLSL=ON -DDILIGENT_NO_GLSLANG=ON -DDILIGENT_INSTALL_CORE=OFF \
+        -DDILIGENT_BUILD_TESTS=OFF
+    cmake --build "$build/diligent-ps5" --target Diligent-GraphicsEngineVk-static Diligent-GraphicsTools
+    exit
+fi
+
 if [[ $mode == runtime ]]; then
     cmake -S "$REXGLUE_SRC" -B "$REXGLUE_PS5_BUILD" "${common[@]}" \
         -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
@@ -83,6 +112,14 @@ fi
 # The template writes dist/ beside its sources. Give this project a separate
 # checkout so its build cannot overwrite another project's local package.
 template="$build/title-template"
+title_build="$build/title"
+title_game="$root/ps5"
+if [[ $mode == native-smoke ]]; then
+    template="$build/native-title-template"
+    title_build="$build/native-title"
+    title_game="$root/ps5/native-smoke"
+    export HELLS_GATE_DILIGENT_ROOT="$build"
+fi
 if [[ ! -d $template ]]; then
     git clone --no-hardlinks "$PS5_REXGLUE_TEMPLATE" "$template"
 fi
@@ -100,7 +137,7 @@ done
 
 smoke=OFF
 [[ $mode != smoke ]] || smoke=ON
-cmake -S "$template" -B "$build/title" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+cmake -S "$template" -B "$title_build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DPS5_VULKAN_DIR="$PS5_VULKAN_DIR" \
-    -DTITLE_GAME="$root/ps5" -DHELLS_GATE_SMOKE="$smoke"
-cmake --build "$build/title" --target link
+    -DTITLE_GAME="$title_game" -DHELLS_GATE_SMOKE="$smoke"
+cmake --build "$title_build" --target link

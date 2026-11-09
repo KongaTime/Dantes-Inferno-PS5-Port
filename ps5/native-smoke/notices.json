@@ -1,0 +1,14 @@
+[
+  {
+    "id": "diligent-core",
+    "name": "DiligentCore Vulkan backend",
+    "licence": "Apache-2.0",
+    "copyright": ["Diligent Graphics LLC", "Egor Yusov"],
+    "repo": "diligent-core",
+    "texts": [["License.txt", "LICENSE"]],
+    "submodule_texts": [
+      ["ThirdParty/SPIRV-Cross/LICENSE", "SPIRV-Cross-LICENSE"],
+      ["ThirdParty/Vulkan-Headers/LICENSE.md", "Vulkan-Headers-LICENSE"]
+    ]
+  }
+]

@@ -1,0 +1,242 @@
+diff --git a/BuildTools/CMake/VulkanUtils.cmake b/BuildTools/CMake/VulkanUtils.cmake
+index 3d8ed52..167ec49 100644
+--- a/BuildTools/CMake/VulkanUtils.cmake
++++ b/BuildTools/CMake/VulkanUtils.cmake
+@@ -1,6 +1,9 @@
+ # Returns platform-specific Vulkan definitions
+ function(get_vulkan_platform_definitions OutVarName)
+-    if(PLATFORM_WIN32)
++    if(PS5)
++        # The title owns presentation; no desktop window system is used.
++        set(Defs "")
++    elseif(PLATFORM_WIN32)
+         set(Defs
+             VK_USE_PLATFORM_WIN32_KHR=1
+         )
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index bda023b..c2f9207 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -119,6 +119,9 @@ else()
+     if(${CMAKE_SYSTEM_NAME} STREQUAL "Android")
+         set(PLATFORM_ANDROID TRUE CACHE INTERNAL "Target platform: Android")
+         message("Target platform: Android " ${ARCH})
++    elseif(PS5)
++        set(PLATFORM_LINUX TRUE CACHE INTERNAL "Target platform: PS5 using POSIX platform utilities")
++        message("Target platform: PS5 " ${ARCH})
+     elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+         set(PLATFORM_LINUX TRUE CACHE INTERNAL "Target platform: Linux")
+         message("Target platform: Linux " ${ARCH})
+diff --git a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
+index 4534337..9a77807 100644
+--- a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
++++ b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
+@@ -251,13 +251,22 @@ std::shared_ptr<Instance> Instance::Create(const CreateInfo& CI)
+ }
+ 
+ #if DILIGENT_USE_VOLK
++#    if defined(__PROSPERO__)
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance, const char*);
++#    endif
+ static bool LoadVulkan()
+ {
+     static bool VulkanLoaded = false;
+     if (VulkanLoaded)
+         return true;
+ 
++#    if defined(__PROSPERO__)
++    // RADV is linked into the title. There is no desktop Vulkan loader.
++    volkInitializeCustom(vk_icdGetInstanceProcAddr);
++    VulkanLoaded = vkCreateInstance != nullptr;
++#    else
+     VulkanLoaded = (volkInitialize() == VK_SUCCESS);
++#    endif
+     return VulkanLoaded;
+ }
+ #endif
+diff --git a/Platforms/Linux/src/LinuxFileSystem.cpp b/Platforms/Linux/src/LinuxFileSystem.cpp
+index 51da651..fe9fdd0 100644
+--- a/Platforms/Linux/src/LinuxFileSystem.cpp
++++ b/Platforms/Linux/src/LinuxFileSystem.cpp
+@@ -31,10 +31,15 @@
+ #include <cstdio>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#if defined(__PROSPERO__)
++#include <filesystem>
++#include <string_view>
++#else
+ #include <ftw.h>
+ #include <glob.h>
+-#include <mutex>
+ #include <pwd.h>
++#endif
++#include <mutex>
+ #include <errno.h>
+ 
+ #include "../interface/LinuxFileSystem.hpp"
+@@ -112,13 +117,28 @@ bool LinuxFileSystem::CreateDirectory(const Char* strPath)
+ }
+ 
+ // The maximum number of file descriptors that shall be used by nftw() while traversing the file tree.
++#if !defined(__PROSPERO__)
+ static constexpr int MaxOpenNTFWDescriptors = 32;
++#endif
+ 
+ void LinuxFileSystem::ClearDirectory(const Char* strPath, bool Recursive)
+ {
+     std::string path{strPath};
+     LinuxFileSystem::CorrectSlashes(path);
+ 
++#if defined(__PROSPERO__)
++    namespace fs = std::filesystem;
++    std::error_code error;
++    fs::directory_iterator iter{path, error};
++    const fs::directory_iterator end;
++    for (; !error && iter != end; iter.increment(error))
++    {
++        if (Recursive)
++            fs::remove_all(iter->path(), error);
++        else if (!fs::is_directory(iter->symlink_status(error)) && !error)
++            fs::remove(iter->path(), error);
++    }
++#else
+     auto Callaback = Recursive ?
+         [](const char* Path, const struct stat* pStat, int Type, FTW* pFTWB) {
+             if (pFTWB->level >= 1)
+@@ -134,6 +154,7 @@ void LinuxFileSystem::ClearDirectory(const Char* strPath, bool Recursive)
+         };
+ 
+     nftw(path.c_str(), Callaback, MaxOpenNTFWDescriptors, FTW_DEPTH | FTW_MOUNT | FTW_PHYS);
++#endif
+ }
+ 
+ void LinuxFileSystem::DeleteFile(const Char* strPath)
+@@ -146,6 +167,10 @@ bool LinuxFileSystem::DeleteDirectory(const Char* strPath)
+     std::string path{strPath};
+     LinuxFileSystem::CorrectSlashes(path);
+ 
++#if defined(__PROSPERO__)
++    std::error_code error;
++    return std::filesystem::remove_all(path, error) > 0 && !error;
++#else
+     auto Callaback =
+         [](const char* Path, const struct stat* pStat, int Type, FTW* pFTWB) {
+             return remove(Path);
+@@ -153,6 +178,7 @@ bool LinuxFileSystem::DeleteDirectory(const Char* strPath)
+ 
+     const auto res = nftw(path.c_str(), Callaback, MaxOpenNTFWDescriptors, FTW_DEPTH | FTW_MOUNT | FTW_PHYS);
+     return res == 0;
++#endif
+ }
+ 
+ bool LinuxFileSystem::IsDirectory(const Char* strPath)
+@@ -167,11 +193,71 @@ bool LinuxFileSystem::IsDirectory(const Char* strPath)
+     return S_ISDIR(StatBuff.st_mode);
+ }
+ 
++#if defined(__PROSPERO__)
++// PS5's title modules do not export glob or fnmatch. Diligent searches
++// within a directory using '*' and '?' in the final path component.
++static bool MatchFileName(std::string_view Pattern, std::string_view Name)
++{
++    if (!Name.empty() && Name.front() == '.' && (Pattern.empty() || Pattern.front() != '.'))
++        return false;
++
++    size_t PatternPos = 0;
++    size_t NamePos = 0;
++    size_t Star = std::string_view::npos;
++    size_t StarEnd = 0;
++    while (NamePos < Name.size())
++    {
++        if (PatternPos < Pattern.size() && Pattern[PatternPos] == '*')
++        {
++            Star = PatternPos++;
++            StarEnd = NamePos;
++        }
++        else if (PatternPos < Pattern.size() &&
++                 (Pattern[PatternPos] == '?' || Pattern[PatternPos] == Name[NamePos]))
++        {
++            ++PatternPos;
++            ++NamePos;
++        }
++        else if (Star != std::string_view::npos)
++        {
++            PatternPos = Star + 1;
++            NamePos = ++StarEnd;
++        }
++        else
++        {
++            return false;
++        }
++    }
++    return Pattern.find_first_not_of('*', PatternPos) == std::string_view::npos;
++}
++#endif
++
+ LinuxFileSystem::SearchFilesResult LinuxFileSystem::Search(const Char* SearchPattern)
+ {
+     LinuxFileSystem::SearchFilesResult SearchRes;
+ 
+-#if PLATFORM_LINUX || PLATFORM_APPLE
++#if defined(__PROSPERO__)
++    namespace fs = std::filesystem;
++    std::string path{SearchPattern};
++    CorrectSlashes(path);
++    const fs::path pattern{path};
++    const auto parent = pattern.parent_path();
++    const auto filename = pattern.filename().string();
++    std::error_code error;
++    fs::directory_iterator iter{parent.empty() ? fs::path{"."} : parent, error};
++    const fs::directory_iterator end;
++    for (; !error && iter != end; iter.increment(error))
++    {
++        auto name = iter->path().filename().string();
++        if (MatchFileName(filename, name))
++        {
++            std::error_code entry_error;
++            const bool directory = iter->is_directory(entry_error);
++            if (!entry_error)
++                SearchRes.emplace_back(FindFileData{std::move(name), directory});
++        }
++    }
++#elif PLATFORM_LINUX || PLATFORM_APPLE
+     glob_t glob_result = {};
+     if (glob(SearchPattern, GLOB_TILDE, NULL, &glob_result) == 0)
+     {
+@@ -234,8 +320,12 @@ std::string LinuxFileSystem::GetCurrentDirectory()
+ #if PLATFORM_LINUX || PLATFORM_APPLE
+ std::string LinuxFileSystem::GetLocalAppDataDirectory(const char* AppName, bool Create)
+ {
++#    if defined(__PROSPERO__)
++    std::string AppDataDir{"/app0"};
++#    else
+     const auto* pwuid = getpwuid(getuid());
+     std::string AppDataDir{pwuid->pw_dir};
++#    endif
+     if (!IsSlash(AppDataDir.back()))
+         AppDataDir += SlashSymbol;
+ 
+diff --git a/Platforms/Linux/src/LinuxPlatformMisc.cpp b/Platforms/Linux/src/LinuxPlatformMisc.cpp
+index e522d7f..6037176 100644
+--- a/Platforms/Linux/src/LinuxPlatformMisc.cpp
++++ b/Platforms/Linux/src/LinuxPlatformMisc.cpp
+@@ -33,6 +33,10 @@ namespace Diligent
+ 
+ Uint64 LinuxMisc::SetCurrentThreadAffinity(Uint64 Mask)
+ {
++#if defined(__PROSPERO__)
++    (void)Mask;
++    return 0;
++#else
+     const auto CurrThread = pthread_self();
+ 
+     Uint64 CurrAffinity = 0;
+@@ -58,6 +62,7 @@ Uint64 LinuxMisc::SetCurrentThreadAffinity(Uint64 Mask)
+         return CurrAffinity;
+     else
+         return 0;
++#endif
+ }
+ 
+ } // namespace Diligent
