@@ -4247,10 +4247,10 @@ index 26d554c..9d62173 100644
            rex::align(level_layout.row_pitch_bytes, xenos::kTextureLinearRowAlignmentBytes);
      }
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
-index ec0df7c..84bbdf9 100644
+index ec0df7c..0a68e1d 100644
 --- a/src/graphics/shared_memory.cpp
 +++ b/src/graphics/shared_memory.cpp
-@@ -11,6 +11,7 @@
+@@ -11,15 +11,23 @@
  
  #include <algorithm>
  #include <cstring>
@@ -4258,7 +4258,23 @@ index ec0df7c..84bbdf9 100644
  #include <utility>
  
  #include <rex/assert.h>
-@@ -254,6 +255,10 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last, bool inv
+ #include <rex/bit.h>
++#include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/shared_memory.h>
+ #include <rex/math.h>
+ #include <rex/memory.h>
+ 
++#if REX_PLATFORM_PS5
++REXCVAR_DEFINE_BOOL(ps5_fast_single_residency_request, true, "GPU/PS5",
++                    "Avoid temporary allocation in single-range GPU residency requests")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++#endif
++
+ namespace rex::graphics {
+ 
+ SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
+@@ -254,6 +262,10 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last, bool inv
    }
  }
  
@@ -4269,7 +4285,7 @@ index ec0df7c..84bbdf9 100644
  void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
    if (length == 0 || start >= kBufferSize) {
      return;
-@@ -272,6 +277,34 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
+@@ -272,6 +284,34 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
    MakeRangeValid(start, length, true);
  }
  
@@ -4304,7 +4320,7 @@ index ec0df7c..84bbdf9 100644
  bool SharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
                                                      uint32_t length_allocations) {
    assert_always(
-@@ -342,46 +375,61 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -342,46 +382,66 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
      return true;
    }
  
@@ -4320,7 +4336,12 @@ index ec0df7c..84bbdf9 100644
 +  // after validation, with the same residency and upload path as a batch.
 +  std::span<const std::pair<uint32_t, uint32_t>> merged_ranges;
 +  std::vector<std::pair<uint32_t, uint32_t>> merged_storage;
-+  if (count == 1) {
++#if REX_PLATFORM_PS5
++  const bool fast_single_request = REXCVAR_GET(ps5_fast_single_residency_request);
++#else
++  constexpr bool fast_single_request = true;
++#endif
++  if (count == 1 && fast_single_request) {
 +    const auto& [start, length] = ranges[0];
      if (!length) {
 -      continue;
