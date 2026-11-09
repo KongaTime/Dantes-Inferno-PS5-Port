@@ -4246,6 +4246,181 @@ index 26d554c..9d62173 100644
        level_layout.row_pitch_bytes =
            rex::align(level_layout.row_pitch_bytes, xenos::kTextureLinearRowAlignmentBytes);
      }
+diff --git a/src/graphics/primitive_processor.cpp b/src/graphics/primitive_processor.cpp
+index d49e9c3..12d0880 100644
+--- a/src/graphics/primitive_processor.cpp
++++ b/src/graphics/primitive_processor.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cstring>
+ #include <functional>
+ #include <utility>
+@@ -83,8 +84,90 @@ REXCVAR_DEFINE_INT32(primitive_processor_cache_min_indices, 0, "GPU",
+ //     "Negative values disable caching.",
+ //     "GPU");
+ 
++#if REX_PLATFORM_PS5
++REXCVAR_DECLARE(bool, ps5_profile_draw_phases);
++#endif
++
+ namespace rex::graphics {
+ 
++#if REX_PLATFORM_PS5
++namespace {
++using PrimitiveClock = std::chrono::steady_clock;
++using PrimitiveMicroseconds = std::chrono::duration<double, std::micro>;
++struct PrimitiveTiming {
++  PrimitiveClock::time_point window_start{};
++  unsigned countdown = 0;
++  unsigned draws = 0;
++  unsigned residency_requests = 0;
++  unsigned cache_hits = 0;
++  unsigned cache_misses = 0;
++  unsigned converted_draws = 0;
++  double total_us = 0;
++  double residency_us = 0;
++  double cache_us = 0;
++  bool active = false;
++};
++thread_local PrimitiveTiming primitive_timing;
++
++class ScopedPrimitivePart {
++ public:
++  explicit ScopedPrimitivePart(double& time) : time_(time) {
++    if (primitive_timing.active) {
++      start_ = PrimitiveClock::now();
++    }
++  }
++  ~ScopedPrimitivePart() {
++    if (start_ != PrimitiveClock::time_point{}) {
++      time_ += PrimitiveMicroseconds(PrimitiveClock::now() - start_).count();
++    }
++  }
++
++ private:
++  double& time_;
++  PrimitiveClock::time_point start_{};
++};
++
++class ScopedPrimitiveSample {
++ public:
++  ScopedPrimitiveSample() {
++    auto& timing = primitive_timing;
++    timing.active = REXCVAR_GET(ps5_profile_draw_phases) && timing.countdown-- == 0;
++    if (timing.active) {
++      timing.countdown = 30;
++      start_ = PrimitiveClock::now();
++      if (!timing.draws) {
++        timing.window_start = start_;
++      }
++    }
++  }
++  ~ScopedPrimitiveSample() {
++    auto& timing = primitive_timing;
++    if (!timing.active) {
++      return;
++    }
++    timing.active = false;
++    const auto end = PrimitiveClock::now();
++    ++timing.draws;
++    timing.total_us += PrimitiveMicroseconds(end - start_).count();
++    if (end - timing.window_start >= std::chrono::seconds(5)) {
++      REXGPU_INFO("PS5 primitive detail: {} samples, {} residency requests, {} cache hits, "
++                  "{} misses, {} converted draws, mean us per primitive: "
++                  "residency {:.2f}, conversion cache {:.2f}, other {:.2f}",
++                  timing.draws, timing.residency_requests, timing.cache_hits,
++                  timing.cache_misses, timing.converted_draws,
++                  timing.residency_us / timing.draws, timing.cache_us / timing.draws,
++                  (timing.total_us - timing.residency_us - timing.cache_us) / timing.draws);
++      timing = {};
++      timing.countdown = 30;
++    }
++  }
++
++ private:
++  PrimitiveClock::time_point start_{};
++};
++}  // namespace
++#endif
++
+ // SIMD processing here assumes that alignment is not required (neither AVX nor
+ // Neon requires it) and there's no punishment for using an unaligned access
+ // instruction when the data is actually aligned (AVX has separate aligned /
+@@ -278,6 +361,9 @@ void PrimitiveProcessor::ClearPerFrameCache() {
+ 
+ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
+   SCOPE_profile_cpu_f("gpu");
++#if REX_PLATFORM_PS5
++  ScopedPrimitiveSample primitive_sample;
++#endif
+ 
+   const RegisterFile& regs = register_file_;
+   auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+@@ -911,6 +997,12 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
+       cacheable.index_buffer_type == ProcessedIndexBufferType::kHostBuiltinForDMA) {
+     // Request the index buffer memory.
+     // TODO(Triang3l): Shared memory request cache.
++#if REX_PLATFORM_PS5
++    if (primitive_timing.active) {
++      ++primitive_timing.residency_requests;
++    }
++    ScopedPrimitivePart residency_sample(primitive_timing.residency_us);
++#endif
+     if (!shared_memory_.RequestRange(guest_index_base, guest_index_buffer_needed_bytes)) {
+       REXGPU_ERROR(
+           "PrimitiveProcessor: Failed to request index buffer 0x{:08X}, 0x{:X} "
+@@ -920,6 +1012,12 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
+     }
+   }
+ 
++#if REX_PLATFORM_PS5
++  if (primitive_timing.active &&
++      cacheable.index_buffer_type == ProcessedIndexBufferType::kHostConverted) {
++    ++primitive_timing.converted_draws;
++  }
++#endif
+   result_out.guest_primitive_type = guest_primitive_type;
+   result_out.host_primitive_type = host_primitive_type;
+   result_out.host_vertex_shader_type = host_vertex_shader_type;
+@@ -1326,6 +1424,9 @@ uint32_t PrimitiveProcessor::GetMultiPrimitiveHostIndexCountAndRanges(
+ 
+ PrimitiveProcessor::CacheTransaction::CacheTransaction(PrimitiveProcessor& processor, CacheKey key)
+     : processor_(processor), key_(key) {
++#if REX_PLATFORM_PS5
++  ScopedPrimitivePart cache_sample(primitive_timing.cache_us);
++#endif
+   assert_zero(processor_.cache_currently_processing_size_bytes_);
+   if (REXCVAR_GET(primitive_processor_cache_min_indices) < 0 ||
+       key_.count < uint32_t(REXCVAR_GET(primitive_processor_cache_min_indices))) {
+@@ -1351,6 +1452,15 @@ PrimitiveProcessor::CacheTransaction::CacheTransaction(PrimitiveProcessor& proce
+       processor_.cache_currently_processing_size_bytes_ = size_bytes;
+     }
+   }
++#if REX_PLATFORM_PS5
++  if (primitive_timing.active) {
++    if (result_type_ == ResultType::kExisting) {
++      ++primitive_timing.cache_hits;
++    } else {
++      ++primitive_timing.cache_misses;
++    }
++  }
++#endif
+   if (result_type_ != ResultType::kExisting) {
+     // Enable the invalidation callback before reading the indices.
+     // Also, only enable invalidation callbacks if anything needed processing at
+@@ -1369,6 +1479,9 @@ PrimitiveProcessor::CacheTransaction::~CacheTransaction() {
+   if (!key_.count || result_type_ == ResultType::kExisting) {
+     return;
+   }
++#if REX_PLATFORM_PS5
++  ScopedPrimitivePart cache_sample(primitive_timing.cache_us);
++#endif
+ 
+   std::lock_guard<std::mutex> cache_lock(processor_.cache_mutex_);
+ 
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
 index ec0df7c..1e5dacc 100644
 --- a/src/graphics/shared_memory.cpp
