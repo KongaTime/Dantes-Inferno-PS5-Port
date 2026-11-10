@@ -29,5 +29,3 @@ See the [PS5 build notes](ps5/README.md) and the build-source archive on the [V1
 - **mihawk-99 and the Mesa/RADV contributors** for the Vulkan stack that runs the renderer on PS5. [PS5 Vulkan](https://github.com/mihawk-99/PS5_Vulkan)
 - **The DiligentCore contributors** for the graphics framework used by the native renderer. [DiligentCore](https://github.com/DiligentGraphics/DiligentCore)
 - **Kenney** for the controller icon assets used in the PlayStation prompts. [Icon license](assets/glyphs/kenney/LICENSE.txt)
-
-The PS5 launcher’s ISO importer was adapted from KongaTime’s [The Darkness Recomp PS5](https://github.com/KongaTime/The-Darkness-Recomp-PS5). The original game was developed by Visceral Games and published by Electronic Arts.
