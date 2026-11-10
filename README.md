@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="ps5/docs/ps5-icon.png" alt="Dante’s Inferno PS5 home-screen icon" width="192">
+</p>
+
 # Dante’s Inferno PS5 Port
 
-A PS5 homebrew port of Hell’s Gate, the Xbox 360 recompilation of Dante’s Inferno. This release uses the native renderer and PlayStation button prompts.
+Play Dante’s Inferno on a homebrew-enabled PS5. The port includes a native renderer, PlayStation button prompts, and a launcher that prepares game data from your own Xbox 360 disc image.
 
 ## Install V1.0.0
 
@@ -13,6 +17,17 @@ If your game files are already extracted, put them in `PPSA99343/gamedata/` with
 
 The native renderer, launcher-to-game handoff, and PlayStation prompts were tested on PS5 with prepared game files. ISO extraction passed host tests using a repacked image of the game files and the matching update. First-run ISO extraction on PS5 remains unverified.
 
-See the [PS5 build notes](ps5/README.md) for source and build details. The upstream Hell’s Gate documentation follows.
+## Build and source
 
----
+See the [PS5 build notes](ps5/README.md) and the build-source archive on the [V1.0.0 release page](https://github.com/KongaTime/Dantes-Inferno-PS5-Port/releases/tag/v1.0.0).
+
+## Credits
+
+- **KongaTime** for the PS5 port and console testing.
+- **florinp93 and the Hell’s Gate contributors** for the Xbox 360-to-PC recompilation this port builds on, including the original native renderer. [Hell’s Gate](https://github.com/florinp93/hells-gate-recomp)
+- **The ReXGlue contributors** for the Xbox 360 recompilation tools and runtime. [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk)
+- **mihawk-99 and the Mesa/RADV contributors** for the Vulkan stack that runs the renderer on PS5. [PS5 Vulkan](https://github.com/mihawk-99/PS5_Vulkan)
+- **The DiligentCore contributors** for the graphics framework used by the native renderer. [DiligentCore](https://github.com/DiligentGraphics/DiligentCore)
+- **Kenney** for the controller icon assets used in the PlayStation prompts. [Icon license](assets/glyphs/kenney/LICENSE.txt)
+
+The PS5 launcher’s ISO importer was adapted from KongaTime’s [The Darkness Recomp PS5](https://github.com/KongaTime/The-Darkness-Recomp-PS5). The original game was developed by Visceral Games and published by Electronic Arts.
