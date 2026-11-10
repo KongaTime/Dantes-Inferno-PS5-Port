@@ -53,7 +53,9 @@ class HellsGateApp final : public rex::ReXApp {
     }
 #if HELLS_GATE_PS5_NATIVE_GAME
     try {
-      paths.game_data_root = hells_gate::ps5::RunLauncher(window(), paths.game_data_root);
+      render_mode_ = &hells_gate::ps5::LoadRenderMode();
+      paths.game_data_root =
+          hells_gate::ps5::RunLauncher(window(), paths.game_data_root, *render_mode_);
     } catch (const std::exception& error) {
       title_note("launcher: %s", error.what());
       catchReturnFromMain(1);
@@ -78,7 +80,6 @@ class HellsGateApp final : public rex::ReXApp {
     }
 #if HELLS_GATE_PS5_NATIVE_GAME
     rex::cvar::SetFlagByName("renderer", "dante");
-    rex::cvar::SetFlagByName("dante_resolution", "1280x720");
     renderer::ConfigureSyncOnlyGpu();
     config.graphics = std::make_unique<SyncOnlyGraphics>();
 #else
@@ -89,8 +90,11 @@ class HellsGateApp final : public rex::ReXApp {
 #if HELLS_GATE_PS5_NATIVE_GAME
   void OnPostSetup() override {
     renderer::SetButtonGlyphStyleSource([] { return renderer::GlyphStyle::kPlayStation5; });
-    title_note("native game: starting Diligent renderer");
-    if (!renderer::Start(window(), cache_root())) {
+    rex::cvar::SetFlagByName("dante_resolution", render_mode_->resolution);
+    title_note("native game: starting Diligent renderer at %s", render_mode_->resolution);
+    auto render_cache = cache_root();
+    if (!render_cache.empty()) render_cache /= render_mode_->cache_directory;
+    if (!renderer::Start(window(), render_cache)) {
       title_note("native game: FAIL renderer startup");
       catchReturnFromMain(1);
     }
@@ -101,6 +105,7 @@ class HellsGateApp final : public rex::ReXApp {
     renderer::Stop();
   }
 
+  const hells_gate::ps5::RenderMode* render_mode_ = &hells_gate::ps5::k1440p;
 #endif
 
   void OnPreLaunchModule() override {

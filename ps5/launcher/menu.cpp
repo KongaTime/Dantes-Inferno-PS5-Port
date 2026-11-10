@@ -6,12 +6,15 @@
 #include "renderer/ui_overlay.h"
 #include "renderer/vulkan_device.h"
 
+#include <array>
 #include <chrono>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 #include <imgui.h>
+#include <rex/filesystem.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/presenter.h>
@@ -33,6 +36,29 @@ constexpr uint64_t kBaseXexHash = 0x223e3cef15ccbc9dULL;
 constexpr uint64_t kTitleUpdateHash = 0x54cb9c012199af3bULL;
 constexpr uint64_t kTitleUpdateSize = 2205696;
 
+enum class MenuRow { kGame, kResolution, kExit };
+
+fs::path ResolutionPreference() {
+  return rex::filesystem::GetUserFolder() / "dante-render-resolution.txt";
+}
+
+bool SaveRenderMode(const RenderMode& mode) {
+  const auto path = ResolutionPreference();
+  std::error_code error;
+  fs::create_directories(path.parent_path(), error);
+  if (error) return false;
+  auto temporary = path;
+  temporary += ".tmp";
+  std::ofstream file(temporary, std::ios::trunc);
+  file << mode.resolution << '\n';
+  file.close();
+  if (!file) return false;
+  fs::rename(temporary, path, error);
+  if (!error) return true;
+  fs::remove(temporary, error);
+  return false;
+}
+
 class Menu final : public rex::ui::ImGuiDialog {
  public:
   Menu(rex::ui::ImGuiDrawer* drawer, renderer::OverlayDrawer& overlay) : ImGuiDialog(drawer) {
@@ -46,7 +72,8 @@ class Menu final : public rex::ui::ImGuiDialog {
   }
 
   bool ready = false;
-  bool exit_selected = false;
+  MenuRow row = MenuRow::kGame;
+  const RenderMode* preferred_mode = &k1440p;
   bool preparing = false;
   float progress = 0;
   std::string status;
@@ -69,20 +96,26 @@ class Menu final : public rex::ui::ImGuiDialog {
     }
 
     // Cover the mockup's baked-in labels with the current interactive state.
-    draw->AddRectFilled(at(0, .418f), at(.39f, .637f), IM_COL32(30, 17, 14, 255));
-    const float selected_y = exit_selected ? .496f : .428f;
-    draw->AddRectFilled(at(.035f, selected_y), at(.35f, selected_y + .056f),
-                        IM_COL32(100, 60, 29, 255), size.y * .005f);
+    draw->AddRectFilled(at(0, .418f), at(.39f, .692f), IM_COL32(30, 17, 14, 255));
     const char* action = preparing ? "PREPARING GAME" : ready ? "PLAY GAME" : "PREPARE GAME";
-    text(.082f, .435f, .038f, exit_selected ? white : gold, action);
-    text(.082f, .503f, .038f, exit_selected ? gold : white, "EXIT");
+    const std::string resolution = std::string("RESOLUTION   ") + preferred_mode->label;
+    const std::array labels{action, resolution.c_str(), "EXIT"};
+    for (size_t i = 0; i < labels.size(); ++i) {
+      const float y = .428f + float(i) * .059f;
+      const bool selected = i == static_cast<size_t>(row);
+      if (selected) {
+        draw->AddRectFilled(at(.035f, y), at(.35f, y + .053f),
+                            IM_COL32(100, 60, 29, 255), size.y * .005f);
+      }
+      text(.065f, y + .007f, .033f, selected ? gold : white, labels[i]);
+    }
     if (!status.empty()) {
-      draw->AddText(ImGui::GetFont(), size.y * .021f, at(.046f, .567f), white,
+      draw->AddText(ImGui::GetFont(), size.y * .021f, at(.046f, .609f), white,
                     status.c_str(), nullptr, size.x * .315f);
     }
     if (preparing) {
-      draw->AddRectFilled(at(.046f, .619f), at(.35f, .626f), IM_COL32(80, 59, 46, 255));
-      draw->AddRectFilled(at(.046f, .619f), at(.046f + .304f * progress, .626f), gold);
+      draw->AddRectFilled(at(.046f, .672f), at(.35f, .679f), IM_COL32(80, 59, 46, 255));
+      draw->AddRectFilled(at(.046f, .672f), at(.046f + .304f * progress, .679f), gold);
     }
   }
 
@@ -102,7 +135,14 @@ PrepareConfig LocalPrepareConfig() {
 
 }  // namespace
 
-fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game) {
+const RenderMode& LoadRenderMode() {
+  std::ifstream file(ResolutionPreference());
+  std::string value;
+  return std::getline(file, value) && value == k4K.resolution ? k4K : k1440p;
+}
+
+fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game,
+                     const RenderMode& mode) {
   constexpr const char* kFallbackGame = "/app0/gamedata";
   // Prepare installs into the root this title launches from (game_data_root),
   // not a second copy inside the app folder; the app-local folder is only the
@@ -112,7 +152,7 @@ fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game) {
   auto prepared = gameReady(configured_game) ? configured_game : fs::path(kFallbackGame);
   // Heap-allocated so the game renderer can take over the very same swap chain.
   auto device = std::make_unique<renderer::VulkanDevice>();
-  if (!device->Initialize(nullptr, 1280, 720)) {
+  if (!device->Initialize(nullptr, mode.width, mode.height)) {
     throw std::runtime_error("Could not initialize the PS5 launcher display.");
   }
   renderer::OverlayRenderer overlay_renderer(device.get());
@@ -120,6 +160,7 @@ fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game) {
   rex::ui::ImGuiDrawer drawer(window, 64);
   drawer.SetImmediateDrawer(&overlay_drawer);
   Menu menu(&drawer, overlay_drawer);
+  menu.preferred_mode = &mode;
   menu.ready = gameReady(prepared);
   menu.status = menu.ready ? "Cross: Play     Circle: Exit" : "Cross: Prepare     Circle: Exit";
   device->SetBeforePresent([&](auto* back_buffer) {
@@ -136,15 +177,36 @@ fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game) {
 
   struct pad input{};
   pad_poll(&input);
+  title_note("launcher: active render mode %s", mode.resolution);
   title_note("launcher: %s", menu.ready ? "Play Game" : "Prepare Game");
   while (true) {
     paint();
     pad_poll(&input);
-    if (input.pressed & (PAD_UP | PAD_DOWN)) menu.exit_selected = !menu.exit_selected;
-    if ((input.pressed & PAD_CIRCLE) || (menu.exit_selected && (input.pressed & PAD_CROSS))) {
-      return {};
+    if (input.pressed & PAD_UP) {
+      menu.row = static_cast<MenuRow>((static_cast<int>(menu.row) + 2) % 3);
+    } else if (input.pressed & PAD_DOWN) {
+      menu.row = static_cast<MenuRow>((static_cast<int>(menu.row) + 1) % 3);
     }
-    if (!(input.pressed & PAD_CROSS)) continue;
+    const bool confirm = input.pressed & PAD_CROSS;
+    if ((input.pressed & PAD_CIRCLE) || (menu.row == MenuRow::kExit && confirm)) return {};
+    if (menu.row == MenuRow::kResolution &&
+        (confirm || (input.pressed & (PAD_LEFT | PAD_RIGHT)))) {
+      const auto& next = menu.preferred_mode == &k4K ? k1440p : k4K;
+      if (SaveRenderMode(next)) {
+        menu.preferred_mode = &next;
+        title_note("launcher: saved render mode %s", next.resolution);
+        menu.status = &next == &mode ? "Using this resolution."
+                                    : std::string("Saved. Reopen the app to apply ") + next.label + ".";
+      } else {
+        menu.status = "Could not save the resolution.";
+      }
+      continue;
+    }
+    if (!confirm || menu.row != MenuRow::kGame) continue;
+    if (menu.preferred_mode != &mode) {
+      menu.status = "Reopen the app to apply the saved resolution.";
+      continue;
+    }
     if (menu.ready) {
       // The game renderer reads the same overlay frame mailbox.
       overlay_drawer.PublishEmpty();
