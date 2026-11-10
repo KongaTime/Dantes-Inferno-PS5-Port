@@ -508,10 +508,39 @@ dl::ITextureView* TextureCache::GetView2D(const uint32_t fetch_dwords[6], const 
   if (entry.texture && entry.content_hash == hash) return view(nullptr);
   entry.content_hash = hash;
   m.LoadLevels(fetch, host, base, levels, hash);
+#if defined(__PROSPERO__)
+  // Match the game's shared Minion Pro coverage atlas by content. Adjust its
+  // antialiased edges at upload while keeping its glyph geometry and color.
+  constexpr uint32_t kFontWidth = 512, kFontHeight = 256;
+  constexpr uint64_t kFontHash = 0x572E39128764CC1Full;
+  constexpr uint64_t kFontSeed = kFontWidth | (uint64_t(kFontHeight) << 16) |
+                                 (uint64_t(xenos::TextureFormat::k_8_A) << 32);
+  std::vector<uint8_t> sharper_font;
+  const void* original_font = nullptr;
+  if (info.format == xenos::TextureFormat::k_8_A && levels.width == kFontWidth &&
+      levels.height == kFontHeight && levels.subresources.size() == 1 &&
+      levels.subresources[0].Stride == kFontWidth &&
+      XXH3_64bits_withSeed(levels.subresources[0].pData, kFontWidth * kFontHeight, kFontSeed) ==
+          kFontHash) {
+    const auto* coverage = static_cast<const uint8_t*>(levels.subresources[0].pData);
+    sharper_font.resize(kFontWidth * kFontHeight);
+    std::transform(coverage, coverage + sharper_font.size(), sharper_font.begin(),
+                   [](uint8_t alpha) {
+                     return uint8_t(std::clamp((5 * int(alpha) - 128) / 4, 0, 255));
+                   });
+    original_font = coverage;
+    levels.subresources[0].pData = sharper_font.data();
+    REXLOG_INFO("NATIVE-TEX: sharpened the Minion Pro font atlas");
+  }
+#endif
   if (!m.StoreLevels(entry, levels, host, dl::RESOURCE_DIM_TEX_2D_ARRAY, "GuestTexture")) {
     m.textures.erase(key);
     return nullptr;
   }
+#if defined(__PROSPERO__)
+  // Keep texture mod lookup keyed to the unmodified game data.
+  if (original_font) levels.subresources[0].pData = original_font;
+#endif
   LoadedTexture loaded{levels.width, levels.height, uint32_t(info.format), levels.levels,
                        levels.subresources.empty()
                            ? nullptr

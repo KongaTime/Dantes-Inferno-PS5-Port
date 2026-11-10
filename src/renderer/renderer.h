@@ -11,12 +11,15 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 
 namespace rex::ui {
 class Window;
 }
 
 namespace renderer {
+
+class VulkanDevice;
 
 // The game's draw calls.
 enum class DrawKind : uint8_t {
@@ -36,6 +39,13 @@ struct CallArgs {
 
 // Command buffer write pointer of a D3D device (dev+48), 0 if implausible.
 uint32_t CommandBufferWritePtr(uint32_t device, const uint8_t* base);
+
+// Takes the swap chain the PS5 launcher already presented on, so the title
+// keeps one VideoOut swap chain from the menu into gameplay. A second swap
+// chain created after the launcher's is handed back but never becomes the
+// visible surface: the panel keeps showing the last menu frame. Start() uses
+// this device instead of creating another one.
+void AdoptDevice(std::unique_ptr<VulkanDevice> device);
 
 // UI thread, after GPU setup. Detaches the SDK presenter from the window.
 // cache_dir: where the pipeline storage lives (empty: not recorded). Starts

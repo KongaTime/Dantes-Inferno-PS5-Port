@@ -144,5 +144,17 @@ cmake -S "$template" -B "$title_build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DTITLE_GAME="$title_game" -DHELLS_GATE_SMOKE="$smoke" -DHELLS_GATE_NATIVE_GAME="$native_game"
 cmake --build "$title_build" --target link
 if [[ $mode == native-smoke || $mode == native-game ]]; then
-    cp "$root/ps5/sce_sys/icon0.png" "$template/dist/PPSA99343/sce_sys/icon0.png"
+    art="$title_game/title-art/sce_sys"
+    output="$template/dist/PPSA99343/sce_sys"
+    icon="$art/icon0.png"
+    [[ -f $icon ]] || icon="$root/ps5/sce_sys/icon0.png"
+    cp "$icon" "$output/icon0.png"
+    for asset in pic0.dds pic1.dds; do
+        if [[ -f $art/$asset ]]; then
+            cp "$art/$asset" "$output/$asset"
+        fi
+    done
+    if [[ $mode == native-game && -f $title_game/title-art/launcher.png ]]; then
+        cp "$title_game/title-art/launcher.png" "$template/dist/PPSA99343/launcher.png"
+    fi
 fi

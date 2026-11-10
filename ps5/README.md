@@ -18,10 +18,19 @@ and `bash ps5/build.sh native-smoke`. The package is under
 `native-title-template/dist/PPSA99343` inside the build directory.
 
 With recompiled game sources and the host `glslangValidator` installed,
-`bash ps5/build.sh native-game` builds the experimental game executable for the
-same test title. It uses DiligentCore for draw calls and a headless Xenos command
+`bash ps5/build.sh native-game` builds the native game executable for
+title PPSA99343. It uses DiligentCore for draw calls and a headless Xenos command
 processor for guest GPU synchronization. Supply the game files in `gamedata/`
 or set `game_data_root` in the test title's `dantes_inferno.toml`.
+
+On the console, the launcher shows **Play Game** for a prepared installation.
+For a fresh installation, place the supported Xbox 360 disc ISO in `dump/`
+and the matching raw Title Update 2 in `tu/default.xexp` under the title folder.
+Select **Prepare Game** to extract into `gamedata/`. A failed import keeps the
+existing game folder intact. Press Cross to select or Circle to exit.
+
+To use local launcher art, put `launcher.png` in
+`ps5/native-smoke/title-art/` before building the native game.
 
 ## Build on Linux or WSL
 
@@ -58,24 +67,17 @@ test, register the title folder in your console's homebrew launcher and launch
 **Hell's Gate (PS5 Development)**. Read `hells-gate-results.txt` from the title
 folder. The final check is `smoke: PASS`.
 
-## Resume this build on the current PC
+## V1.0.0 source and dependencies
 
-The compiled tools and PS5 archives are in Ubuntu WSL under
-`/var/tmp/hells-gate-ps5.SQu6Vr`. To reuse them, run the exports above and then
-override the build paths in the same shell.
+The release includes a build-source archive with the pinned ReXGlue and title
+template snapshots, dependency diffs from the build, and the template licence.
+Apply the dependency diffs to the listed base revisions to reproduce the
+dependency source trees. The port uses the retail disc and matching TU2 at
+build time to generate guest sources locally.
 
-```bash
-export HELLS_GATE_BUILD_DIR=/var/tmp/hells-gate-ps5.SQu6Vr
-export REXGLUE_PS5_BUILD="$HELLS_GATE_BUILD_DIR/ps5-build"
-```
-
-The ISO was extracted into the WSL build directory's `disc/` folder.
-The corresponding source checkout with the generated guest sources is under
-`hells-gate-game/`. The build used the Title Update 2 patch from the upstream
-portable release. The signed game build and game data are already staged at
-`/data/homebrew/PPSA99342`. ShadowMount+ has registered the folder. Launch it from the home screen as
-**Hell's Gate (PS5 Development)**. The included template icon is required for
-registration on the tested ShadowMount+ build.
+For the native release, run the `runtime`, `host`, `codegen`, `native-deps`,
+and `native-game` modes in order. Use the host CLI path from the host build as
+`REXGLUE_CODEGEN` and install `glslangValidator` before building the title.
 
 ## Build the game when the disc and update are ready
 

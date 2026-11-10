@@ -22,6 +22,9 @@ if(HELLS_GATE_NATIVE_GAME)
             "${HELLS_GATE_ROOT}/thirdparty/smaa/SMAA.hlsl"
         VERBATIM)
     target_sources(hells_gate_app PRIVATE
+        "${HELLS_GATE_ROOT}/ps5/launcher/menu.cpp"
+        "${HELLS_GATE_ROOT}/ps5/launcher/iso_import.cpp"
+        "${HELLS_GATE_ROOT}/ps5/launcher/prepare_game.cpp"
         "${renderer_dir}/renderer.cpp"
         "${renderer_dir}/draw_renderer.cpp"
         "${renderer_dir}/pipeline_storage.cpp"
@@ -40,9 +43,12 @@ if(HELLS_GATE_NATIVE_GAME)
         "${renderer_dir}/state_verifier.cpp"
         "${renderer_dir}/guest_gpu_state.cpp"
         "${ps5_spirv}")
+    include("${HELLS_GATE_ROOT}/cmake/EmbedGlyphIcons.cmake")
+    hells_gate_embed_glyph_icons(hells_gate_app "${HELLS_GATE_ROOT}/assets/glyphs/kenney")
     set(native_target hells_gate_app)
     target_compile_definitions(hells_gate_app PRIVATE HELLS_GATE_PS5_NATIVE_GAME=1)
     target_include_directories(hells_gate_app PRIVATE
+        "${ROOT}/src"
         "${CMAKE_CURRENT_BINARY_DIR}"
         "${REXGLUE_SRC}/thirdparty/glslang"
         "${diligent_root}/diligent-core/ThirdParty/stb")

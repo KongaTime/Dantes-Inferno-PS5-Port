@@ -296,6 +296,8 @@ RenderScale ComputeRenderScale(rex::ui::Window* window) {
 }
 
 std::unique_ptr<VulkanDevice> g_device;
+// The launcher's device, taken over by Start instead of creating a second swap chain.
+std::unique_ptr<VulkanDevice> g_adopted_device;
 uint64_t g_frame = 0;
 bool g_log_this_frame = false;
 // First frame of an F8 capture: every resolve output and the front buffer are
@@ -1353,6 +1355,11 @@ void PresentTestPattern() {
 
 }  // namespace
 
+void AdoptDevice(std::unique_ptr<VulkanDevice> device) {
+  std::lock_guard lock(g_mutex);
+  g_adopted_device = std::move(device);
+}
+
 bool Start(rex::ui::Window* window, const std::filesystem::path& cache_dir) {
   std::lock_guard lock(g_mutex);
   if (g_device) return true;
@@ -1364,10 +1371,15 @@ bool Start(rex::ui::Window* window, const std::filesystem::path& cache_dir) {
   }
 #endif
   if (window) window->SetPresenter(nullptr);
-  auto device = std::make_unique<VulkanDevice>();
-  if (!device->Initialize(hwnd, 1280, 720)) {
-    REXLOG_ERROR("DanteDevice: native device initialization failed");
-    return false;
+  std::unique_ptr<VulkanDevice> device = std::move(g_adopted_device);
+  if (device) {
+    REXLOG_INFO("DanteDevice: presenting on the launcher's swap chain");
+  } else {
+    device = std::make_unique<VulkanDevice>();
+    if (!device->Initialize(hwnd, 1280, 720)) {
+      REXLOG_ERROR("DanteDevice: native device initialization failed");
+      return false;
+    }
   }
   const dl::GraphicsAdapterInfo& adapter = device->RenderDevice()->GetAdapterInfo();
   const dl::RenderDeviceInfo& device_info = device->RenderDevice()->GetDeviceInfo();

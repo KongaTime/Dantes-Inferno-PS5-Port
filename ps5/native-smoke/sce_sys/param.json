@@ -13,7 +13,7 @@
   "gameIntent": { "permittedIntents": [{ "intentType": "launchActivity" }] },
   "localizedParameters": {
     "defaultLanguage": "en-US",
-    "en-US": { "titleName": "Hell's Gate Native Renderer Test" }
+    "en-US": { "titleName": "Dantes Inferno" }
   },
   "masterVersion": "01.00",
   "pubtools": {

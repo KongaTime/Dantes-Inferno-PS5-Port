@@ -12,6 +12,7 @@
 #include <rex/system/xmemory.h>
 
 #if HELLS_GATE_PS5_NATIVE_GAME
+#include "launcher/menu.h"
 #include "renderer/renderer.h"
 #include "renderer/renderer_config.h"
 #endif
@@ -50,6 +51,15 @@ class HellsGateApp final : public rex::ReXApp {
     if (paths.game_data_root.empty()) {
       paths.game_data_root = "/app0/gamedata";
     }
+#if HELLS_GATE_PS5_NATIVE_GAME
+    try {
+      paths.game_data_root = hells_gate::ps5::RunLauncher(window(), paths.game_data_root);
+    } catch (const std::exception& error) {
+      title_note("launcher: %s", error.what());
+      catchReturnFromMain(1);
+    }
+    if (paths.game_data_root.empty()) catchReturnFromMain(0);
+#endif
     for (const auto* name : {"default.xex", "default.xexp"}) {
       const auto path = paths.game_data_root / name;
       std::error_code error;
@@ -78,6 +88,7 @@ class HellsGateApp final : public rex::ReXApp {
 
 #if HELLS_GATE_PS5_NATIVE_GAME
   void OnPostSetup() override {
+    renderer::SetButtonGlyphStyleSource([] { return renderer::GlyphStyle::kPlayStation5; });
     title_note("native game: starting Diligent renderer");
     if (!renderer::Start(window(), cache_root())) {
       title_note("native game: FAIL renderer startup");
@@ -89,6 +100,7 @@ class HellsGateApp final : public rex::ReXApp {
   void OnShutdown() override {
     renderer::Stop();
   }
+
 #endif
 
   void OnPreLaunchModule() override {
