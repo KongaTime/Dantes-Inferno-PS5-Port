@@ -3,8 +3,8 @@
 This branch adds a native Prospero homebrew target for Dante's Inferno. The first
 boot path uses ReXGlue's statically linked Xenos Vulkan backend and the PS5
 Vulkan stack from the existing PS5 ReXGlue template. Hell's Gate's DiligentCore
-renderer, launcher, DLC installer and desktop overlays are outside this first
-boot target.
+renderer, launcher and desktop overlays are outside this first boot target.
+DLC is installed at startup from `/app0/dlc` (see the main README).
 
 The smoke app uses the same PS5 runtime and graphics libraries. It opens a
 window, reads back a sentinel from the Xbox 360 guest heap, and initializes the
@@ -67,7 +67,7 @@ test, register the title folder in your console's homebrew launcher and launch
 **Hell's Gate (PS5 Development)**. Read `hells-gate-results.txt` from the title
 folder. The final check is `smoke: PASS`.
 
-## V1.1.0 source and dependencies
+## V1.2.0 source and dependencies
 
 The release includes a build-source archive with the pinned ReXGlue and title
 template snapshots, dependency diffs from the build, and the template licence.

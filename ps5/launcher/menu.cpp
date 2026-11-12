@@ -77,6 +77,8 @@ class Menu final : public rex::ui::ImGuiDialog {
   bool preparing = false;
   float progress = 0;
   std::string status;
+  // Replaces the first row's label while work runs after Play (DLC install).
+  std::string action_override;
 
  private:
   void OnDraw(ImGuiIO& io) override {
@@ -97,7 +99,10 @@ class Menu final : public rex::ui::ImGuiDialog {
 
     // Cover the mockup's baked-in labels with the current interactive state.
     draw->AddRectFilled(at(0, .418f), at(.39f, .692f), IM_COL32(30, 17, 14, 255));
-    const char* action = preparing ? "PREPARING GAME" : ready ? "PLAY GAME" : "PREPARE GAME";
+    const char* action = !action_override.empty() ? action_override.c_str()
+                         : preparing              ? "PREPARING GAME"
+                         : ready                  ? "PLAY GAME"
+                                                  : "PREPARE GAME";
     const std::string resolution = std::string("RESOLUTION   ") + preferred_mode->label;
     const std::array labels{action, resolution.c_str(), "EXIT"};
     for (size_t i = 0; i < labels.size(); ++i) {
@@ -141,6 +146,78 @@ const RenderMode& LoadRenderMode() {
   return std::getline(file, value) && value == k4K.resolution ? k4K : k1440p;
 }
 
+// Everything the launcher draws with. It lives past RunLauncher so the menu can
+// show work done after Play (the DLC install) before the game takes the swap
+// chain. Members are declared in the order the launcher used to create them, so
+// they are destroyed in reverse, as before.
+namespace {
+
+struct LauncherSession {
+  LauncherSession(rex::ui::Window* window, const RenderMode& mode) : window(window) {
+    // Heap-allocated so the game renderer can take over the very same swap chain.
+    device = std::make_unique<renderer::VulkanDevice>();
+    if (!device->Initialize(nullptr, mode.width, mode.height)) {
+      throw std::runtime_error("Could not initialize the PS5 launcher display.");
+    }
+    overlay_renderer = std::make_unique<renderer::OverlayRenderer>(device.get());
+    drawer = std::make_unique<rex::ui::ImGuiDrawer>(window, 64);
+    drawer->SetImmediateDrawer(&overlay_drawer);
+    menu = std::make_unique<Menu>(drawer.get(), overlay_drawer);
+    device->SetBeforePresent([this](auto* back_buffer) {
+      overlay_renderer->Draw(device->Context(), back_buffer);
+    });
+  }
+
+  void Paint() {
+    rex::ui::AppUIDrawContext context(window->GetActualPhysicalWidth(),
+                                      window->GetActualPhysicalHeight());
+    drawer->Draw(context);
+    device->BeginFrame();
+    device->Clear(.06f, .03f, .02f, 1.0f);
+    device->Present(1);
+  }
+
+  void HandOff() {
+    // The game renderer reads the same overlay frame mailbox.
+    overlay_drawer.PublishEmpty();
+    // Present the game on this swap chain. A swap chain created after this
+    // one reports successful flips but never reaches the panel, which leaves
+    // this menu frame frozen on screen while the game runs behind it.
+    device->SetBeforePresent(nullptr);
+    renderer::AdoptDevice(std::move(device));
+    title_note("launcher: handed the swap chain to the game renderer");
+  }
+
+  rex::ui::Window* window;
+  std::unique_ptr<renderer::VulkanDevice> device;
+  std::unique_ptr<renderer::OverlayRenderer> overlay_renderer;
+  renderer::OverlayDrawer overlay_drawer;
+  std::unique_ptr<rex::ui::ImGuiDrawer> drawer;
+  std::unique_ptr<Menu> menu;
+};
+
+// Set when the player chooses Play; cleared by HandOffLauncher.
+std::unique_ptr<LauncherSession> g_session;
+
+}  // namespace
+
+void ShowLauncherStatus(const std::string& title, const std::string& status, float progress) {
+  if (!g_session) return;
+  auto& menu = *g_session->menu;
+  menu.row = MenuRow::kGame;
+  menu.action_override = title;
+  menu.status = status;
+  menu.preparing = true;
+  menu.progress = progress < 0 ? 0 : progress > 1 ? 1 : progress;
+  g_session->Paint();
+}
+
+void HandOffLauncher() {
+  if (!g_session) return;
+  g_session->HandOff();
+  g_session.reset();
+}
+
 fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game,
                      const RenderMode& mode) {
   constexpr const char* kFallbackGame = "/app0/gamedata";
@@ -150,30 +227,12 @@ fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game,
   const fs::path destination =
       configured_game.empty() ? fs::path(kFallbackGame) : configured_game;
   auto prepared = gameReady(configured_game) ? configured_game : fs::path(kFallbackGame);
-  // Heap-allocated so the game renderer can take over the very same swap chain.
-  auto device = std::make_unique<renderer::VulkanDevice>();
-  if (!device->Initialize(nullptr, mode.width, mode.height)) {
-    throw std::runtime_error("Could not initialize the PS5 launcher display.");
-  }
-  renderer::OverlayRenderer overlay_renderer(device.get());
-  renderer::OverlayDrawer overlay_drawer;
-  rex::ui::ImGuiDrawer drawer(window, 64);
-  drawer.SetImmediateDrawer(&overlay_drawer);
-  Menu menu(&drawer, overlay_drawer);
+  auto session = std::make_unique<LauncherSession>(window, mode);
+  Menu& menu = *session->menu;
   menu.preferred_mode = &mode;
   menu.ready = gameReady(prepared);
   menu.status = menu.ready ? "Cross: Play     Circle: Exit" : "Cross: Prepare     Circle: Exit";
-  device->SetBeforePresent([&](auto* back_buffer) {
-    overlay_renderer.Draw(device->Context(), back_buffer);
-  });
-  auto paint = [&] {
-    rex::ui::AppUIDrawContext context(window->GetActualPhysicalWidth(),
-                                      window->GetActualPhysicalHeight());
-    drawer.Draw(context);
-    device->BeginFrame();
-    device->Clear(.06f, .03f, .02f, 1.0f);
-    device->Present(1);
-  };
+  auto paint = [&] { session->Paint(); };
 
   struct pad input{};
   pad_poll(&input);
@@ -208,14 +267,11 @@ fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game,
       continue;
     }
     if (menu.ready) {
-      // The game renderer reads the same overlay frame mailbox.
-      overlay_drawer.PublishEmpty();
-      // Present the game on this swap chain. A swap chain created after this
-      // one reports successful flips but never reaches the panel, which leaves
-      // this menu frame frozen on screen while the game runs behind it.
-      device->SetBeforePresent(nullptr);
-      renderer::AdoptDevice(std::move(device));
-      title_note("launcher: handed the swap chain to the game renderer");
+      // Keep the screen until the game hands off (HandOffLauncher), so work
+      // before the first game frame can show progress here.
+      menu.status = "Starting...";
+      paint();
+      g_session = std::move(session);
       return prepared;
     }
     menu.preparing = true;
