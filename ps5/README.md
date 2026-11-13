@@ -67,7 +67,7 @@ test, register the title folder in your console's homebrew launcher and launch
 **Hell's Gate (PS5 Development)**. Read `hells-gate-results.txt` from the title
 folder. The final check is `smoke: PASS`.
 
-## V1.2.0 source and dependencies
+## V1.2.1 source and dependencies
 
 The release includes a build-source archive with the pinned ReXGlue and title
 template snapshots, dependency diffs from the build, and the template licence.

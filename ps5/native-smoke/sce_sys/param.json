@@ -8,7 +8,7 @@
   "conceptId": "99343",
   "contentBadgeType": 1,
   "contentId": "UP9000-PPSA99343_00-HELLSGATENATIVE0",
-  "contentVersion": "01.002.000",
+  "contentVersion": "01.002.001",
   "downloadDataSize": 256,
   "gameIntent": { "permittedIntents": [{ "intentType": "launchActivity" }] },
   "localizedParameters": {
