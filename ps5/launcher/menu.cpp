@@ -33,8 +33,15 @@ namespace {
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 constexpr uint64_t kBaseXexHash = 0x223e3cef15ccbc9dULL;
-constexpr uint64_t kTitleUpdateHash = 0x54cb9c012199af3bULL;
+// Two Title Update 2 builds recompile to identical code against this disc:
+// the official one for media ID 49028C6A (base version 0.0.0.1, signature
+// matches the disc) and the 0.0.0.3-based one the port was first generated
+// with. Checked by running codegen with each and diffing the output.
+constexpr uint64_t kTitleUpdateHashOfficial = 0xe515a97ca28f956eULL;
+constexpr uint64_t kTitleUpdateHashOriginal = 0x54cb9c012199af3bULL;
 constexpr uint64_t kTitleUpdateSize = 2205696;
+constexpr uint32_t kTitleId = 0x454108CF;
+constexpr uint32_t kMediaId = 0x49028C6A;
 
 enum class MenuRow { kGame, kResolution, kExit };
 
@@ -130,11 +137,10 @@ class Menu final : public rex::ui::ImGuiDialog {
 PrepareConfig LocalPrepareConfig() {
   PrepareConfig config;
   config.iso_roots = {"/app0/dump", "/app0"};
-  config.update = "/app0/tu/default.xexp";
-  config.update_fallback = "/app0/default.xexp";
+  config.update_roots = {"/app0/tu", "/app0/default.xexp"};
   config.base_xex_hash = kBaseXexHash;
-  config.update_hash = kTitleUpdateHash;
-  config.update_size = kTitleUpdateSize;
+  config.update = {{kTitleUpdateHashOfficial, kTitleUpdateHashOriginal}, kTitleUpdateSize, kTitleId,
+                   kMediaId};
   return config;
 }
 
@@ -221,23 +227,28 @@ void HandOffLauncher() {
 fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game,
                      const RenderMode& mode) {
   constexpr const char* kFallbackGame = "/app0/gamedata";
-  // Prepare installs into the root this title launches from (game_data_root),
-  // not a second copy inside the app folder; the app-local folder is only the
-  // fallback when no root was configured.
-  const fs::path destination =
-      configured_game.empty() ? fs::path(kFallbackGame) : configured_game;
+  // An extracted install (from an earlier version, or a configured root) is
+  // played as before; otherwise the disc image a Prepare recorded.
   auto prepared = gameReady(configured_game) ? configured_game : fs::path(kFallbackGame);
+  bool ready = gameReady(prepared);
+  if (!ready) {
+    if (auto disc = discGameReady(kDiscBootDir)) {
+      prepared = *disc;
+      ready = true;
+    }
+  }
   auto session = std::make_unique<LauncherSession>(window, mode);
   Menu& menu = *session->menu;
   menu.preferred_mode = &mode;
-  menu.ready = gameReady(prepared);
+  menu.ready = ready;
   menu.status = menu.ready ? "Cross: Play     Circle: Exit" : "Cross: Prepare     Circle: Exit";
   auto paint = [&] { session->Paint(); };
 
   struct pad input{};
   pad_poll(&input);
   title_note("launcher: active render mode %s", mode.resolution);
-  title_note("launcher: %s", menu.ready ? "Play Game" : "Prepare Game");
+  title_note("launcher: %s (%s)", menu.ready ? "Play Game" : "Prepare Game",
+             menu.ready ? prepared.c_str() : "not prepared");
   while (true) {
     paint();
     pad_poll(&input);
@@ -278,19 +289,8 @@ fs::path RunLauncher(rex::ui::Window* window, const fs::path& configured_game,
     menu.status = "Checking disc and title update...";
     menu.progress = 0;
     paint();
-    auto last_paint = Clock::now();
     try {
-      prepareGame(LocalPrepareConfig(), destination, [&](uint64_t done, uint64_t total,
-                                                        const std::string&) {
-        auto now = Clock::now();
-        if (now - last_paint < std::chrono::milliseconds(100)) return;
-        last_paint = now;
-        menu.progress = total ? float(double(done) / double(total)) : 0;
-        menu.status = "Extracting disc... " + std::to_string(int(menu.progress * 100)) + "%";
-        paint();
-        pad_poll(&input);
-      });
-      prepared = destination;
+      prepared = prepareDiscGame(LocalPrepareConfig(), kDiscBootDir);
       menu.ready = true;
       menu.status = "Game ready. Press Cross to play.";
       title_note("launcher: preparation complete");

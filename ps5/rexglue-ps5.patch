@@ -60,6 +60,68 @@ index f8949ca..1b8101b 100644
  };
  
  }  // namespace rex::audio::sdl
+diff --git a/include/rex/filesystem/devices/disc_image_device.h b/include/rex/filesystem/devices/disc_image_device.h
+index 2183212..b391225 100644
+--- a/include/rex/filesystem/devices/disc_image_device.h
++++ b/include/rex/filesystem/devices/disc_image_device.h
+@@ -47,8 +47,11 @@ class DiscImageDevice : public Device {
+   uint32_t component_name_max_length() const override { return 255; }
+ 
+   uint32_t total_allocation_units() const override {
+-    return uint32_t(mmap_->size() / sectors_per_allocation_unit() / bytes_per_sector());
++    return uint32_t(host_size_ / sectors_per_allocation_unit() / bytes_per_sector());
+   }
++
++  // Reads `length` bytes at `offset` in the image. Safe from any thread.
++  bool ReadAt(size_t offset, void* buffer, size_t length) const;
+   uint32_t available_allocation_units() const override { return 0; }
+   uint32_t sectors_per_allocation_unit() const override { return 1; }
+   uint32_t bytes_per_sector() const override { return 0x200; }
+@@ -65,13 +68,15 @@ class DiscImageDevice : public Device {
+   std::string name_;
+   std::filesystem::path host_path_;
+   std::unique_ptr<Entry> root_entry_;
+-  std::unique_ptr<memory::MappedMemory> mmap_;
++  // The image is read with pread rather than memory-mapped: on the PS5,
++  // touching a file mapping of a title's /app0 data never completes.
++  int fd_ = -1;
++  size_t host_size_ = 0;
+   DiscInfo disc_info_{};
+   uint64_t file_count_ = 0;
+   uint64_t total_file_size_ = 0;
+ 
+   typedef struct {
+-    uint8_t* ptr;
+     size_t size;         // Size (bytes) of total image.
+     size_t game_offset;  // Offset (bytes) of game partition.
+     size_t root_sector;  // Offset (sector) of root.
+@@ -81,9 +86,9 @@ class DiscImageDevice : public Device {
+ 
+   Error Verify(ParseState* state);
+   bool VerifyMagic(ParseState* state, size_t offset);
+-  Error ReadAllEntries(ParseState* state, const uint8_t* root_buffer);
+-  bool ReadEntry(ParseState* state, const uint8_t* buffer, uint16_t entry_ordinal,
+-                 DiscImageEntry* parent);
++  Error ReadAllEntries(ParseState* state, const uint8_t* root_buffer, size_t root_size);
++  bool ReadEntry(ParseState* state, const uint8_t* buffer, size_t buffer_size,
++                 uint16_t entry_ordinal, DiscImageEntry* parent, int depth);
+ };
+ 
+ }  // namespace rex::filesystem
+diff --git a/include/rex/filesystem/devices/disc_image_entry.h b/include/rex/filesystem/devices/disc_image_entry.h
+index 01dfc4a..ff11e96 100644
+--- a/include/rex/filesystem/devices/disc_image_entry.h
++++ b/include/rex/filesystem/devices/disc_image_entry.h
+@@ -37,7 +37,8 @@ class DiscImageEntry : public Entry {
+ 
+   X_STATUS Open(uint32_t desired_access, File** out_file) override;
+ 
+-  bool can_map() const override { return true; }
++  // Entries of a pread-backed image (no mapping) are read through their File.
++  bool can_map() const override { return mmap_ != nullptr; }
+   std::unique_ptr<memory::MappedMemory> OpenMapped(memory::MappedMemory::Mode mode, size_t offset,
+                                                    size_t length) override;
+ 
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
 index 384ff66..97a1817 100644
 --- a/include/rex/graphics/command_processor.h
@@ -1610,6 +1672,254 @@ index 4fcfd7b..a9cc9f0 100644
  }
  
  std::string to_string(char32_t c) {
+diff --git a/src/filesystem/devices/disc_image_device.cpp b/src/filesystem/devices/disc_image_device.cpp
+index 9d47734..2c72c69 100644
+--- a/src/filesystem/devices/disc_image_device.cpp
++++ b/src/filesystem/devices/disc_image_device.cpp
+@@ -17,6 +17,19 @@
+ #include <rex/math.h>
+ #include <rex/memory.h>
+ 
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <cerrno>
++#include <cstring>
++#include <vector>
++#if defined(_WIN32)
++#include <io.h>
++#include <algorithm>
++#include <mutex>
++#else
++#include <unistd.h>
++#endif
++
+ namespace rex::filesystem {
+ 
+ using namespace rex::literals;
+@@ -27,25 +40,71 @@ DiscImageDevice::DiscImageDevice(const std::string_view mount_path,
+                                  const std::filesystem::path& host_path)
+     : Device(mount_path), name_("GDFX"), host_path_(host_path) {}
+ 
+-DiscImageDevice::~DiscImageDevice() = default;
++DiscImageDevice::~DiscImageDevice() {
++  if (fd_ >= 0) {
++#if defined(_WIN32)
++    _close(fd_);
++#else
++    close(fd_);
++#endif
++  }
++}
++
++bool DiscImageDevice::ReadAt(size_t offset, void* buffer, size_t length) const {
++  if (fd_ < 0 || offset > host_size_ || length > host_size_ - offset) {
++    return false;
++  }
++  auto* out = static_cast<uint8_t*>(buffer);
++  while (length) {
++#if defined(_WIN32)
++    // No pread: serialize seek + read.
++    static std::mutex lock;
++    std::lock_guard guard(lock);
++    if (_lseeki64(fd_, int64_t(offset), SEEK_SET) < 0) return false;
++    const int n = _read(fd_, out, unsigned(std::min<size_t>(length, 1u << 30)));
++#else
++    const ssize_t n = pread(fd_, out, length, off_t(offset));
++    if (n < 0 && errno == EINTR) continue;
++#endif
++    if (n <= 0) return false;
++    out += n;
++    offset += size_t(n);
++    length -= size_t(n);
++  }
++  return true;
++}
+ 
+ bool DiscImageDevice::Initialize() {
+-  mmap_ = memory::MappedMemory::Open(host_path_, memory::MappedMemory::Mode::kRead);
+-  if (!mmap_) {
+-    REXFS_ERROR("Disc image could not be mapped");
++#if defined(_WIN32)
++  fd_ = _wopen(host_path_.c_str(), _O_RDONLY | _O_BINARY);
++#else
++  fd_ = open(host_path_.c_str(), O_RDONLY);
++#endif
++  if (fd_ < 0) {
++    REXFS_ERROR("Disc image could not be opened: {}", host_path_.string());
++    return false;
++  }
++  struct stat info {};
++  if (fstat(fd_, &info) != 0) {
++    REXFS_ERROR("Disc image size unknown: {}", host_path_.string());
+     return false;
+   }
++  host_size_ = size_t(info.st_size);
+ 
+   ParseState state = {};
+-  state.ptr = mmap_->data();
+-  state.size = mmap_->size();
++  state.size = host_size_;
+   auto result = Verify(&state);
+   if (result != Error::kSuccess) {
+     REXFS_ERROR("Failed to verify disc image header: {}", static_cast<int>(result));
+     return false;
+   }
+ 
+-  result = ReadAllEntries(&state, state.ptr + state.root_offset);
++  std::vector<uint8_t> root(state.root_size);
++  if (!ReadAt(state.root_offset, root.data(), root.size())) {
++    REXFS_ERROR("Failed to read the disc image's root directory");
++    return false;
++  }
++  result = ReadAllEntries(&state, root.data(), root.size());
+   if (result != Error::kSuccess) {
+     REXFS_ERROR("Failed to read all GDFX entries: {}", static_cast<int>(result));
+     return false;
+@@ -92,9 +151,12 @@ DiscImageDevice::Error DiscImageDevice::Verify(ParseState* state) {
+   if (state->size < state->game_offset + (32 * kXESectorSize)) {
+     return Error::kErrorReadError;
+   }
+-  uint8_t* fs_ptr = state->ptr + state->game_offset + (32 * kXESectorSize);
+-  state->root_sector = memory::load<uint32_t>(fs_ptr + 20);
+-  state->root_size = memory::load<uint32_t>(fs_ptr + 24);
++  uint8_t fs_header[28];
++  if (!ReadAt(state->game_offset + (32 * kXESectorSize), fs_header, sizeof(fs_header))) {
++    return Error::kErrorReadError;
++  }
++  state->root_sector = memory::load<uint32_t>(fs_header + 20);
++  state->root_size = memory::load<uint32_t>(fs_header + 24);
+   state->root_offset = state->game_offset + (state->root_sector * kXESectorSize);
+   if (state->root_size < 13 || state->root_size > 32_MiB) {
+     return Error::kErrorDamagedFile;
+@@ -114,25 +176,37 @@ bool DiscImageDevice::VerifyMagic(ParseState* state, size_t offset) {
+   }
+ 
+   // Simple check to see if the given offset contains the magic value.
+-  return std::memcmp(state->ptr + offset, "MICROSOFT*XBOX*MEDIA", 20) == 0;
++  char magic[20];
++  return ReadAt(offset, magic, sizeof(magic)) &&
++         std::memcmp(magic, "MICROSOFT*XBOX*MEDIA", 20) == 0;
+ }
+ 
+ DiscImageDevice::Error DiscImageDevice::ReadAllEntries(ParseState* state,
+-                                                       const uint8_t* root_buffer) {
+-  auto root_entry = new DiscImageEntry(this, nullptr, "", mmap_.get());
++                                                       const uint8_t* root_buffer,
++                                                       size_t root_size) {
++  auto root_entry = new DiscImageEntry(this, nullptr, "", nullptr);
+   root_entry->attributes_ = kFileAttributeDirectory;
+   root_entry_ = std::unique_ptr<Entry>(root_entry);
+ 
+-  if (!ReadEntry(state, root_buffer, 0, root_entry)) {
++  if (!ReadEntry(state, root_buffer, root_size, 0, root_entry, 0)) {
+     return Error::kErrorOutOfMemory;
+   }
+ 
+   return Error::kSuccess;
+ }
+ 
+-bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer, uint16_t entry_ordinal,
+-                                DiscImageEntry* parent) {
+-  const uint8_t* p = buffer + (entry_ordinal * 4);
++bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer, size_t buffer_size,
++                                uint16_t entry_ordinal, DiscImageEntry* parent, int depth) {
++  // Entries are bounds-checked against their directory table: the image is
++  // no longer one mapping, and a corrupt table must not read past it.
++  if (depth > 4096) {
++    return false;
++  }
++  const size_t at = size_t(entry_ordinal) * 4;
++  if (at + 14 > buffer_size || at + 14 + buffer[at + 13] > buffer_size) {
++    return false;
++  }
++  const uint8_t* p = buffer + at;
+ 
+   uint16_t node_l = memory::load<uint16_t>(p + 0);
+   uint16_t node_r = memory::load<uint16_t>(p + 2);
+@@ -142,13 +216,13 @@ bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer, uint16
+   uint8_t name_length = memory::load<uint8_t>(p + 13);
+   auto name_buffer = reinterpret_cast<const char*>(p + 14);
+ 
+-  if (node_l && !ReadEntry(state, buffer, node_l, parent)) {
++  if (node_l && !ReadEntry(state, buffer, buffer_size, node_l, parent, depth + 1)) {
+     return false;
+   }
+ 
+   auto name = std::string(name_buffer, name_length);
+ 
+-  auto entry = DiscImageEntry::Create(this, parent, name, mmap_.get());
++  auto entry = DiscImageEntry::Create(this, parent, name, nullptr);
+   entry->attributes_ = attributes | kFileAttributeReadOnly;
+   entry->size_ = length;
+   entry->allocation_size_ = rex::round_up(length, bytes_per_sector());
+@@ -169,8 +243,12 @@ bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer, uint16
+         return false;
+       }
+       // Read child list.
+-      uint8_t* folder_ptr = state->ptr + state->game_offset + (sector * kXESectorSize);
+-      if (!ReadEntry(state, folder_ptr, 0, entry.get())) {
++      if (length > 32_MiB) {
++        return false;
++      }
++      std::vector<uint8_t> folder(length);
++      if (!ReadAt(state->game_offset + (sector * kXESectorSize), folder.data(), folder.size()) ||
++          !ReadEntry(state, folder.data(), folder.size(), 0, entry.get(), depth + 1)) {
+         return false;
+       }
+     }
+@@ -186,7 +264,7 @@ bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer, uint16
+   parent->children_.emplace_back(std::move(entry));
+ 
+   // Read next file in the list.
+-  if (node_r && !ReadEntry(state, buffer, node_r, parent)) {
++  if (node_r && !ReadEntry(state, buffer, buffer_size, node_r, parent, depth + 1)) {
+     return false;
+   }
+ 
+diff --git a/src/filesystem/devices/disc_image_entry.cpp b/src/filesystem/devices/disc_image_entry.cpp
+index 1986c71..ec2ca1e 100644
+--- a/src/filesystem/devices/disc_image_entry.cpp
++++ b/src/filesystem/devices/disc_image_entry.cpp
+@@ -39,7 +39,7 @@ X_STATUS DiscImageEntry::Open(uint32_t desired_access, File** out_file) {
+ 
+ std::unique_ptr<memory::MappedMemory> DiscImageEntry::OpenMapped(memory::MappedMemory::Mode mode,
+                                                                  size_t offset, size_t length) {
+-  if (mode != memory::MappedMemory::Mode::kRead) {
++  if (mode != memory::MappedMemory::Mode::kRead || !mmap_) {
+     // Only allow reads.
+     return nullptr;
+   }
+diff --git a/src/filesystem/devices/disc_image_file.cpp b/src/filesystem/devices/disc_image_file.cpp
+index 313c9af..d2e521c 100644
+--- a/src/filesystem/devices/disc_image_file.cpp
++++ b/src/filesystem/devices/disc_image_file.cpp
+@@ -9,10 +9,12 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/filesystem/devices/disc_image_device.h>
+ #include <rex/filesystem/devices/disc_image_entry.h>
+ #include <rex/filesystem/devices/disc_image_file.h>
+ 
+ #include <algorithm>
++#include <cstring>
+ 
+ namespace rex::filesystem {
+ 
+@@ -32,7 +34,12 @@ X_STATUS DiscImageFile::ReadSync(std::span<uint8_t> buffer, size_t byte_offset,
+   }
+   size_t real_offset = entry_->data_offset() + byte_offset;
+   size_t real_length = std::min(buffer.size(), entry_->data_size() - byte_offset);
+-  std::memcpy(buffer.data(), entry_->mmap()->data() + real_offset, real_length);
++  if (entry_->mmap()) {
++    std::memcpy(buffer.data(), entry_->mmap()->data() + real_offset, real_length);
++  } else if (!static_cast<DiscImageDevice*>(entry_->device())
++                  ->ReadAt(real_offset, buffer.data(), real_length)) {
++    return X_STATUS_UNSUCCESSFUL;
++  }
+   *out_bytes_read = real_length;
+   return X_STATUS_SUCCESS;
+ }
 diff --git a/src/filesystem/devices/host_path_device.cpp b/src/filesystem/devices/host_path_device.cpp
 index f68b79a..18e343a 100644
 --- a/src/filesystem/devices/host_path_device.cpp
@@ -6518,6 +6828,62 @@ index 2b93005..870398a 100644
      }
      return false;
    }
+diff --git a/src/system/runtime.cpp b/src/system/runtime.cpp
+index c10694c..5026e64 100644
+--- a/src/system/runtime.cpp
++++ b/src/system/runtime.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <rex/chrono/clock.h>
+ #include <rex/cvar.h>
++#include <rex/filesystem/devices/disc_image_device.h>
+ #include <rex/filesystem/devices/host_path_device.h>
+ #include <rex/filesystem/devices/null_device.h>
+ #include <rex/filesystem/vfs.h>
+@@ -303,12 +304,19 @@ bool Runtime::SetupVfs() {
+     return false;
+   }
+ 
+-  // Mount game_data_root as \Device\Harddisk0\Partition1
++  // Mount game_data_root as \Device\Harddisk0\Partition1: a folder of
++  // extracted files, or a disc image read in place.
+   auto mount_path = "\\Device\\Harddisk0\\Partition1";
+-  auto device = std::make_unique<rex::filesystem::HostPathDevice>(
+-      mount_path, abs_game_root, !REXCVAR_GET(allow_game_relative_writes));
++  std::unique_ptr<rex::filesystem::Device> device;
++  if (std::filesystem::is_regular_file(abs_game_root)) {
++    device = std::make_unique<rex::filesystem::DiscImageDevice>(mount_path, abs_game_root);
++  } else {
++    device = std::make_unique<rex::filesystem::HostPathDevice>(
++        mount_path, abs_game_root, !REXCVAR_GET(allow_game_relative_writes));
++  }
+   if (!device->Initialize()) {
+-    REXSYS_ERROR("Runtime::SetupVfs: Failed to initialize host path device");
++    REXSYS_ERROR("Runtime::SetupVfs: Failed to initialize game device for {}",
++                 abs_game_root.string());
+     return false;
+   }
+   if (!file_system_->RegisterDevice(std::move(device))) {
+diff --git a/src/system/user_module.cpp b/src/system/user_module.cpp
+index 171546f..25c10d5 100644
+--- a/src/system/user_module.cpp
++++ b/src/system/user_module.cpp
+@@ -102,8 +102,14 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
+     return result;
+   }
+ 
+-  // Search for sibling XEX patch file
++  // Search for sibling XEX patch file, then for one on update:\ (a disc
++  // image mounted as game:\ cannot hold the title update).
+   auto patch_entry = kernel_state_->file_system()->ResolvePath(path_ + "p");
++  if (!patch_entry) {
++    const auto slash = path_.find_last_of("\\/:");
++    const auto name = slash == std::string::npos ? path_ : path_.substr(slash + 1);
++    patch_entry = kernel_state_->file_system()->ResolvePath("update:\\" + name + "p");
++  }
+   if (patch_entry) {
+     auto patch_path = patch_entry->absolute_path();
+ 
 diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
 index d0c7bfd..ee53a31 100644
 --- a/src/system/xam/content_manager.cpp
@@ -7074,7 +7440,7 @@ index 7360ed9..0244400 100644
        guest_output_mailbox_acquired_and_ready_.load(std::memory_order_relaxed);
    // Desired acquired = current acquired (changed only by the consumers).
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index 7bd277a..dc8058f 100644
+index 7bd277a..a1eb7fa 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
 @@ -64,6 +64,12 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
@@ -7090,7 +7456,28 @@ index 7bd277a..dc8058f 100644
  namespace rex {
  
  // --- ReXApp ---
-@@ -357,7 +363,7 @@ bool ReXApp::SetupPresentation() {
+@@ -246,7 +252,9 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
+     rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+     return false;
+   }
+-  if (!std::filesystem::is_directory(paths.game_data_root)) {
++  // A folder of extracted files, or a disc image mounted in place.
++  if (!std::filesystem::is_directory(paths.game_data_root) &&
++      !std::filesystem::is_regular_file(paths.game_data_root)) {
+     auto msg = fmt::format("--game_data_root does not exist: {}", paths.game_data_root.string());
+     REXLOG_ERROR("{}", msg);
+     rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+@@ -302,7 +310,8 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
+   OnLoadXexImage(xex_image);
+ 
+   // Mirrors the game:\ / d:\ -> game_data_root mapping in Runtime::SetupVfs.
+-  {
++  // A disc image root is checked when it is mounted instead.
++  if (!std::filesystem::is_regular_file(paths.game_data_root)) {
+     constexpr std::string_view kGameDevice = "game:\\";
+     constexpr std::string_view kDDevice = "d:\\";
+     std::string_view tail = xex_image;
+@@ -357,7 +366,7 @@ bool ReXApp::SetupPresentation() {
    OnPreSetup(config_);
  
    if (!config_.graphics && !config_.gpu_plugin.empty()) {
@@ -7099,7 +7486,7 @@ index 7bd277a..dc8058f 100644
      if (!config_.graphics) {
        // Fatal by design: no silent headless fallback.
        auto msg =
-@@ -370,6 +376,13 @@ bool ReXApp::SetupPresentation() {
+@@ -370,6 +379,13 @@ bool ReXApp::SetupPresentation() {
  
    if (config_.graphics) {
      X_STATUS status = config_.graphics->SetupPresentation(&app_context());

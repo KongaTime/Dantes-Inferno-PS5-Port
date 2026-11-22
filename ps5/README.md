@@ -25,9 +25,17 @@ or set `game_data_root` in the test title's `dantes_inferno.toml`.
 
 On the console, the launcher shows **Play Game** for a prepared installation.
 For a fresh installation, place the supported Xbox 360 disc ISO in `dump/`
-and the matching raw Title Update 2 in `tu/default.xexp` under the title folder.
-Select **Prepare Game** to extract into `gamedata/`. A failed import keeps the
-existing game folder intact. Press Cross to select or Circle to exit.
+and Title Update 2 for media ID `49028C6A` in `tu/` under the title folder,
+either as the downloaded STFS package or as the extracted `default.xexp`.
+Select **Prepare Game** to check both and write the title update to
+`discboot/default.xexp`, with `discboot/disc.txt` naming the image. The game
+then mounts the ISO in place as `game:\` (ReXGlue's disc-image device, reading
+with `pread`) and `discboot/` as `update:\`, where the patch loader finds the
+title update. Nothing is extracted. A PS5 title can write only about 1.5 GB at
+full speed before writes drop to about 2 MB/s, so copying the disc took most
+of an hour, and touching a memory mapping of the ISO froze the console. An
+extracted `gamedata/` folder, if present, is still played as before. Press
+Cross to select or Circle to exit.
 
 To use local launcher art, put `launcher.png` in
 `ps5/native-smoke/title-art/` before building the native game.
@@ -67,7 +75,7 @@ test, register the title folder in your console's homebrew launcher and launch
 **Hell's Gate (PS5 Development)**. Read `hells-gate-results.txt` from the title
 folder. The final check is `smoke: PASS`.
 
-## V1.2.1 source and dependencies
+## V1.3.0 source and dependencies
 
 The release includes a build-source archive with the pinned ReXGlue and title
 template snapshots, dependency diffs from the build, and the template licence.

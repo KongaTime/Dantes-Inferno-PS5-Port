@@ -298,6 +298,19 @@ class HellsGateApp final : public rex::ReXApp {
       catchReturnFromMain(1);
     }
     if (paths.game_data_root.empty()) catchReturnFromMain(0);
+    std::error_code disc_error;
+    if (std::filesystem::is_regular_file(paths.game_data_root, disc_error)) {
+      // The disc image is mounted in place as game:\; the title update that
+      // Prepare wrote is found on update:\.
+      paths.update_data_root = hells_gate::ps5::kDiscBootDir;
+      const auto update = paths.update_data_root / "default.xexp";
+      if (!std::filesystem::is_regular_file(update, disc_error)) {
+        title_note("Missing required game file %s", update.c_str());
+        catchReturnFromMain(1);
+      }
+      title_note("launcher: playing from %s", paths.game_data_root.c_str());
+      return paths;
+    }
 #endif
     for (const auto* name : {"default.xex", "default.xexp"}) {
       const auto path = paths.game_data_root / name;

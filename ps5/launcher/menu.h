@@ -24,7 +24,13 @@ inline constexpr RenderMode k4K{3840, 2160, "4K", "3840x2160", "2160p"};
 // The swap chain is created once per launch, then handed to the game.
 const RenderMode& LoadRenderMode();
 
-// Returns the game-data folder when the player selects Play, or empty on Exit.
+// Where Prepare Game writes the title update (default.xexp) and disc.txt when
+// the game runs from the disc image in dump/. Mounted as update:\.
+inline constexpr const char* kDiscBootDir = "/app0/discboot";
+
+// Returns the game root when the player selects Play, or empty on Exit: an
+// extracted game-data folder, or the disc image to mount in place (then the
+// title update is in kDiscBootDir).
 // After Play the launcher keeps the screen: call ShowLauncherStatus for any
 // work done before the game starts, then HandOffLauncher before the game
 // renderer starts.

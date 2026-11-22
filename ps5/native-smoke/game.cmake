@@ -25,6 +25,7 @@ if(HELLS_GATE_NATIVE_GAME)
         "${HELLS_GATE_ROOT}/ps5/launcher/menu.cpp"
         "${HELLS_GATE_ROOT}/ps5/launcher/iso_import.cpp"
         "${HELLS_GATE_ROOT}/ps5/launcher/prepare_game.cpp"
+        "${HELLS_GATE_ROOT}/ps5/launcher/title_update.cpp"
         "${renderer_dir}/renderer.cpp"
         "${renderer_dir}/draw_renderer.cpp"
         "${renderer_dir}/pipeline_storage.cpp"

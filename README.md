@@ -6,14 +6,14 @@
 
 Play Dante’s Inferno on a homebrew-enabled PS5. The port includes a native renderer, PlayStation button prompts, and a launcher that prepares game data from your own Xbox 360 disc image.
 
-## Install V1.2.1
+## Install V1.3.0
 
-1. Download `Dantes.Inferno.PS5.Port.V1.2.1.zip` from [GitHub Releases](https://github.com/KongaTime/Dantes-Inferno-PS5-Port/releases/tag/v1.2.1).
+1. Download `Dantes.Inferno.PS5.Port.V1.3.0.zip` from [GitHub Releases](https://github.com/KongaTime/Dantes-Inferno-PS5-Port/releases/tag/v1.3.0).
 2. Extract the `PPSA99343` folder to `/data/homebrew/` on a PS5 set up to run homebrew. Register the title with ShadowMount+.
-3. Place your Xbox 360 disc ISO in `PPSA99343/dump/` and the matching raw Title Update 2 in `PPSA99343/tu/default.xexp`. Create the folders if needed.
-4. Open **Dantes Inferno** on the PS5 and choose **Prepare Game**. Once preparation finishes, choose **Play Game**.
+3. Place your Xbox 360 disc ISO in `PPSA99343/dump/` and Title Update 2 in `PPSA99343/tu/`. Create the folders if needed. The Title Update can be the package file as downloaded (any file name) or the `default.xexp` extracted from it. You don't need Velocity. You can leave several Title Updates in `tu/`, and the launcher picks the one that matches.
+4. Open **Dantes Inferno** on the PS5 and choose **Prepare Game**. It checks the disc and Title Update and takes a few seconds. The disc isn't copied: the game reads it directly from `dump/`, so leave the ISO there. Then choose **Play Game**. If something doesn't match, the launcher tells you which file and which media ID it expected.
 
-If your game files are already extracted, put them in `PPSA99343/gamedata/` with both `default.xex` and `default.xexp` at that folder’s root. The download requires your own game data and title update. The port supports the USA/Europe disc (EA-2255, version 1.0) with Title Update 2.
+If your game files are already extracted, put them in `PPSA99343/gamedata/` with both `default.xex` and `default.xexp` at that folder’s root. The launcher plays an extracted `gamedata/` folder whenever one is there. If you prepared from the ISO instead, you can delete an old `gamedata/` folder to free about 6 GB. The download requires your own game data and title update. The port supports the USA/Europe disc (EA-2255, version 1.0, media ID `49028C6A`) with the Title Update 2 for that media ID. Dante's Inferno was also released under media IDs `27C36C6C` and `55DC7AF2`, and those discs and their Title Updates are not supported.
 
 To update from an earlier version, close the app and copy the new `PPSA99343` folder over the existing one. Your `gamedata/`, saves and settings stay in place.
 
@@ -31,13 +31,13 @@ Installing only happens once per package. Trials of St. Lucia is the largest pac
 
 The default internal resolution is **1440p (2560×1440)**. To use **4K (3840×2160)**, select **Resolution** in the Recomp launcher, press Cross or D-pad Left/Right to change it, then exit and reopen the app. The launcher remembers your choice.
 
-V1.2.1 fixes a slowdown after about 20 minutes of play, where the frame rate fell to around 30 fps with regular freezes. A 44-minute session on PS5 stayed at 60 fps.
+V1.3.0 plays the game straight from your ISO, so **Prepare Game** takes seconds instead of copying the disc, and it accepts the Title Update package as downloaded. It includes the V1.2.1 fix for the slowdown after about 20 minutes of play.
 
-The native renderer, launcher-to-game handoff, and PlayStation prompts were tested on PS5 with prepared game files. DLC installation was tested on PS5 with all 13 DLC packages. ISO extraction passed host tests using a repacked image of the game files and the matching update. First-run ISO extraction on PS5 remains unverified.
+The native renderer, launcher-to-game handoff, and PlayStation prompts were tested on PS5. DLC installation was tested on PS5 with all 13 DLC packages. A fresh setup from the ISO with the official Title Update 2 package, from **Prepare Game** into gameplay, was tested on PS5.
 
 ## Build and source
 
-See the [PS5 build notes](ps5/README.md) and the build-source archive on the [V1.2.1 release page](https://github.com/KongaTime/Dantes-Inferno-PS5-Port/releases/tag/v1.2.1).
+See the [PS5 build notes](ps5/README.md) and the build-source archive on the [V1.3.0 release page](https://github.com/KongaTime/Dantes-Inferno-PS5-Port/releases/tag/v1.3.0).
 
 ## Credits
 
